@@ -17,6 +17,7 @@ from pathlib import Path
 
 import requests
 
+from .move_flags import SHOWDOWN_MOVES_URL, fallback_table, parse_showdown, sd_id
 from .rosters import GAMES, parse_entry, static_roster
 from .typechart import TYPES
 
@@ -323,6 +324,28 @@ class LiveProvider:
                     "desc": " ".join(desc.split())}
         return self._cached(f"move_v2/{name}", build)
 
+    def move_flags_table(self) -> tuple[dict, str]:
+        """({showdown_id: [flags]}, source). Pokémon Showdown data, cached; curated fallback offline."""
+        p = self._cpath("showdown_move_flags")
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8")), "showdown"
+            except Exception:
+                pass
+        try:
+            r = self.s.get(SHOWDOWN_MOVES_URL, timeout=self.timeout)
+            r.raise_for_status()
+            tbl = parse_showdown(r.json())
+            if len(tbl) > 500:
+                p.write_text(json.dumps(tbl), encoding="utf-8")
+                return tbl, "showdown"
+        except Exception:
+            pass
+        return fallback_table(), "fallback"
+
+    def move_flags(self, slug: str) -> frozenset:
+        return frozenset(self.move_flags_table()[0].get(sd_id(slug), []))
+
     def moves_many(self, names, workers: int = 12) -> dict:
         def one(n):
             try:
@@ -397,6 +420,9 @@ class DemoProvider(LiveProvider):
 
     def ability(self, name):
         return {"name": name, "display": pretty(name), "desc": ""}
+
+    def move_flags_table(self):
+        return fallback_table(), "fallback"
 
     def sprite_url(self, entry, small=False):
         return None

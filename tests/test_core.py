@@ -64,6 +64,28 @@ def test_ability_calcs():
     assert intimidate_stage(None) == -1
 
 
+def test_move_flags_and_abilities():
+    from core.move_flags import fallback_table, parse_showdown, sd_id
+    raw = {"closecombat": {"flags": {"contact": 1, "protect": 1}, "secondary": None, "self": {"boosts": {}}},
+           "crunch": {"flags": {"contact": 1, "bite": 1}, "secondary": {"chance": 20}},
+           "flareblitz": {"flags": {"contact": 1}, "recoil": [33, 100], "secondary": {"chance": 10}}}
+    t = parse_showdown(raw)
+    assert t["closecombat"] == ["contact"] and set(t["crunch"]) == {"contact", "bite", "secondary"}
+    assert "recoil" in t["flareblitz"] and sd_id("close-combat") == "closecombat"
+    assert "punch" in fallback_table()["drainpunch"]
+    st = {"hp": 150, "atk": 150, "def": 100, "spa": 100, "spd": 100, "spe": 100}
+    D = Battler("D", ["water"], dict(st), 50)
+    bite = Move("crunch", "dark", 80, "physical", flags=frozenset({"contact", "bite", "secondary"}))
+    plain = calc(Battler("A", ["normal"], dict(st), 50), D, bite)["max"]
+    for ab in ("strong-jaw", "tough-claws", "sheer-force"):
+        assert calc(Battler("A", ["normal"], dict(st), 50, ab), D, bite)["max"] > plain, ab
+    D.ability = "fluffy"
+    assert calc(Battler("A", ["normal"], dict(st), 50), D, bite)["max"] < plain
+    D.ability = "bulletproof"
+    ball = Move("shadow-ball", "ghost", 80, "special", flags=frozenset({"bullet"}))
+    assert calc(Battler("A", ["normal"], dict(st), 50), D, ball)["max"] == 0
+
+
 def test_stats():
     assert calc_stat("hp", 108, 50) == 183
     assert calc_stat("hp", 108, 100, 31, 252) == 420

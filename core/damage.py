@@ -42,6 +42,7 @@ class Move:
     power: int
     category: str                  # physical / special
     spread: bool = False
+    flags: frozenset = frozenset()  # contact, punch, bite, pulse, slicing, sound, bullet, wind, secondary, recoil
 
 
 @dataclass
@@ -81,6 +82,11 @@ ATTACKER_ABILITIES = {
     "tinted-lens": "Not very effective ×2", "neuroforce": "Super effective ×1.25",
     "sniper": "Critical hit ×2.25", "scrappy": "Normal/Fighting χτυπούν Ghost",
     "minds-eye": "Normal/Fighting χτυπούν Ghost", "unaware": "Αγνοεί τα boosts άμυνας του στόχου",
+    "tough-claws": "Contact κινήσεις ×1.3", "iron-fist": "Punch κινήσεις ×1.2",
+    "strong-jaw": "Bite κινήσεις ×1.5", "mega-launcher": "Pulse κινήσεις ×1.5",
+    "sharpness": "Slicing κινήσεις ×1.5", "sheer-force": "Κινήσεις με secondary effect ×1.3",
+    "reckless": "Κινήσεις με recoil ×1.2", "punk-rock": "Sound κινήσεις ×1.3",
+    "liquid-voice": "Sound κινήσεις γίνονται Water",
     "mold-breaker": "Αγνοεί την ability του στόχου", "teravolt": "Αγνοεί την ability του στόχου",
     "turboblaze": "Αγνοεί την ability του στόχου",
 }
@@ -140,6 +146,8 @@ def calc(att: Battler, dfn: Battler, mv: Move, fld: Field | None = None) -> dict
         mtype, ate = _ATE[aab], True
     elif aab == "normalize":
         mtype, ate = "normal", True
+    elif aab == "liquid-voice" and "sound" in mv.flags:
+        mtype = "water"
 
     # ---- type effectiveness / immunities ----
     def_types = dfn.def_types
@@ -150,6 +158,8 @@ def calc(att: Battler, dfn: Battler, mv: Move, fld: Field | None = None) -> dict
         eff = 0
     if dab == "wonder-guard" and eff <= 1:
         eff = 0
+    if {"bulletproof": "bullet", "soundproof": "sound", "wind-rider": "wind"}.get(dab) in mv.flags:
+        eff = 0
     if eff == 0:
         return {"rolls": [0] * 16, "min": 0, "max": 0, "eff": 0, "note": "Immune", "type": mtype}
 
@@ -158,6 +168,12 @@ def calc(att: Battler, dfn: Battler, mv: Move, fld: Field | None = None) -> dict
         power = math.floor(power * 1.5)
     if ate:
         power = poke_round(power * 4915 / 4096)
+    flag_boost = {"tough-claws": ("contact", 5325), "iron-fist": ("punch", 4915), "strong-jaw": ("bite", 6144),
+                  "mega-launcher": ("pulse", 6144), "sharpness": ("slicing", 6144),
+                  "sheer-force": ("secondary", 5325), "reckless": ("recoil", 4915),
+                  "punk-rock": ("sound", 5325)}.get(aab)
+    if flag_boost and flag_boost[0] in mv.flags:
+        power = poke_round(power * flag_boost[1] / 4096)
     if aab == "sand-force" and fld.weather == "sand" and mtype in ("rock", "ground", "steel"):
         power = poke_round(power * 5325 / 4096)
     if fld.terrain and _grounded(att) and (fld.terrain, mtype) in (
@@ -255,6 +271,10 @@ def calc(att: Battler, dfn: Battler, mv: Move, fld: Field | None = None) -> dict
         final *= 0.5
     if dab == "fluffy" and mtype == "fire":
         final *= 2
+    if dab == "fluffy" and "contact" in mv.flags:
+        final *= 0.5
+    if dab == "punk-rock" and "sound" in mv.flags:
+        final *= 0.5
     if dab == "dry-skin" and mtype == "fire":
         final *= 1.25
     if dab == "purifying-salt" and mtype == "ghost":

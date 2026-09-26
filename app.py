@@ -22,6 +22,7 @@ from core.analysis import (CRITERIA, QUAD_CRITERIA, SYN_LABEL, SYN_WEIGHTS, buil
 from core.damage import (ATTACKER_ABILITIES, CALC_ABILITIES, DEFENDER_ABILITIES, ITEMS, Battler, Field, Move, calc,
                          intimidate_stage, ko_text)
 from core.data import DemoProvider, LiveProvider, pretty
+from core.move_flags import FLAG_LABEL, sd_id
 from core.mcda import PREF_FUNCS, promethee, spearman, topsis
 from core.rosters import GAMES
 from core.stats import (NATURES, SHORT, SPREADS, STAT_LABEL, STATS, calc_all, nature_label, recommended_spread,
@@ -126,6 +127,20 @@ def get_move(source: str, name: str) -> dict:
 @st.cache_data(show_spinner="Λήψη λεπτομερειών κινήσεων…")
 def get_moves_many(source: str, names: tuple) -> dict:
     return get_provider(source).moves_many(list(names))
+
+
+@st.cache_data(show_spinner="Λήψη move flags (Pokémon Showdown data)…")
+def get_flags_table(source: str) -> tuple:
+    return get_provider(source).move_flags_table()
+
+
+def flags_for(slug: str) -> frozenset:
+    return frozenset(get_flags_table(SRC)[0].get(sd_id(slug), []))
+
+
+def flags_text(fl) -> str:
+    return " · ".join(FLAG_LABEL[f] for f in ("contact", "punch", "bite", "pulse", "slicing", "sound", "bullet",
+                                               "wind", "secondary", "recoil") if f in fl)
 
 
 @st.cache_data(show_spinner=False)
@@ -534,7 +549,8 @@ def moves_section(p: dict):
                      "Τύπος": (d.get("type") or mi.get(m, {}).get("type", "?")).capitalize(),
                      "Κατ.": (d.get("category") or mi.get(m, {}).get("category", "?")).capitalize(),
                      "Power": d.get("power"), "Acc.": d.get("accuracy"), "PP": d.get("pp"),
-                     "Prio": d.get("priority"), "Περιγραφή": d.get("desc", "")})
+                     "Prio": d.get("priority"), "Flags": flags_text(flags_for(m)),
+                     "Περιγραφή": d.get("desc", "")})
     mv = pd.DataFrame(rows)
     if mv.empty:
         st.info("Δεν βρέθηκαν κινήσεις.")
@@ -566,6 +582,7 @@ def moves_section(p: dict):
                      "Acc.": st.column_config.NumberColumn(width="small"),
                      "PP": st.column_config.NumberColumn(width="small"),
                      "Prio": st.column_config.NumberColumn(width="small"),
+                     "Flags": st.column_config.TextColumn(width="small", help="Από τα δεδομένα του Pokémon Showdown"),
                      "Περιγραφή": st.column_config.TextColumn(width="large"),
                  })
     if GAME != "sv":
@@ -689,7 +706,8 @@ def page_damage():
     ls = f5.checkbox("Light Screen")
     fld = Field(None if weather == "—" else weather, None if terrain == "—" else terrain, crit,
                 fmt == "Doubles", reflect, ls)
-    mv = Move(mname, md["type"], power, md["category"], spread)
+    mflags = flags_for(mname)
+    mv = Move(mname, md["type"], power, md["category"], spread, mflags)
     r = calc(A, D, mv, fld)
     hp = D.stats["hp"]
     cur = max(1, round(hp * D.hp_pct / 100))
@@ -700,6 +718,12 @@ def page_damage():
                 f"{cat_badge(md['category'])} {power} BP → {D.name}", unsafe_allow_html=True)
     if md.get("desc"):
         st.caption(md["desc"])
+    if mflags:
+        st.caption("Flags: " + flags_text(mflags))
+    if get_flags_table(SRC)[1] == "fallback" and (A.ability in ("tough-claws", "sheer-force") or
+                                                   D.ability == "fluffy"):
+        st.warning("Δεν ήταν διαθέσιμα τα δεδομένα του Pokémon Showdown, οπότε δεν είναι γνωστό αν η κίνηση "
+                   "είναι contact ή έχει secondary effect — η ability δεν εφαρμόζεται.")
     if r["max"] == 0:
         st.error(r["note"] or "Καμία ζημιά")
         return
@@ -718,7 +742,7 @@ def page_damage():
             d = get_move(SRC, m)
             if not d["power"]:
                 continue
-            rr = calc(A, D, Move(m, d["type"], d["power"], d["category"], spread), fld)
+            rr = calc(A, D, Move(m, d["type"], d["power"], d["category"], spread, flags_for(m)), fld)
             rows.append({"Κίνηση": pretty(m), "Τύπος": d["type"].capitalize(), "Κατ.": d["category"].capitalize(),
                          "Power": d["power"],
                          "Min %": rr["min"] / hp * 100, "Max %": rr["max"] / hp * 100,
