@@ -90,8 +90,15 @@ def badge(t: str) -> str:
 
 # ============================================================ data access (cached)
 @st.cache_resource
-def get_provider(source: str):
+def _provider(source: str, class_id: int):
     return DemoProvider() if source == "demo" else LiveProvider()
+
+
+def get_provider(source: str):
+    """Provider instance; the class id in the cache key makes a code update (redeploy / hot reload)
+    create a fresh instance instead of reusing an object built from the old class."""
+    cls = DemoProvider if source == "demo" else LiveProvider
+    return _provider(source, id(cls))
 
 
 @st.cache_data(show_spinner=False)
