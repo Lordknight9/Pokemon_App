@@ -30,6 +30,53 @@ def sort_roster(entries: list) -> list:
     return sorted(entries, key=lambda e: (e.get("dex") or 99999, e.get("form") == "mega", e["display"]))
 
 
+def evo_condition(d: dict) -> str:
+    """Human-readable evolution condition from a PokeAPI evolution_details entry."""
+    name = lambda k: pretty(d[k]["name"]) if d.get(k) else None  # noqa: E731
+    trig = (d.get("trigger") or {}).get("name", "")
+    parts = []
+    if trig == "level-up":
+        parts.append(f"Lv. {d['min_level']}" if d.get("min_level") else "Level up")
+    elif trig == "use-item":
+        parts.append(f"Use {name('item')}")
+    elif trig == "trade":
+        parts.append("Trade")
+    elif trig:
+        parts.append(pretty(trig))
+    if d.get("held_item"):
+        parts.append(f"holding {name('held_item')}")
+    if d.get("min_happiness"):
+        parts.append("high Friendship")
+    if d.get("min_affection"):
+        parts.append("high Affection")
+    if d.get("known_move"):
+        parts.append(f"knowing {name('known_move')}")
+    if d.get("known_move_type"):
+        parts.append(f"knowing a {name('known_move_type')}-type move")
+    if d.get("location"):
+        parts.append(f"at {name('location')}")
+    if d.get("time_of_day"):
+        parts.append(f"({d['time_of_day'].capitalize()})")
+    if d.get("gender") == 1:
+        parts.append("(♀)")
+    elif d.get("gender") == 2:
+        parts.append("(♂)")
+    if d.get("needs_overworld_rain"):
+        parts.append("while raining")
+    if d.get("party_species"):
+        parts.append(f"with {name('party_species')} in party")
+    if d.get("party_type"):
+        parts.append(f"with a {name('party_type')}-type in party")
+    if d.get("trade_species"):
+        parts.append(f"for {name('trade_species')}")
+    rps = d.get("relative_physical_stats")
+    if rps is not None:
+        parts.append({1: "Atk > Def", -1: "Atk < Def", 0: "Atk = Def"}.get(rps, ""))
+    if d.get("turn_upside_down"):
+        parts.append("holding the console upside down")
+    return " ".join(p for p in parts if p)
+
+
 class NotFound(Exception):
     pass
 
@@ -93,10 +140,11 @@ class LiveProvider:
     def species(self, sp: str) -> dict:
         def build():
             j = self._get(f"pokemon-species/{sp}")
-            return {"name": j["name"],
+            return {"name": j["name"], "id": j.get("id"),
                     "varieties": [v["pokemon"]["name"] for v in j["varieties"]],
-                    "default": next(v["pokemon"]["name"] for v in j["varieties"] if v["is_default"])}
-        return self._cached(f"species/{sp}", build)
+                    "default": next(v["pokemon"]["name"] for v in j["varieties"] if v["is_default"]),
+                    "chain": (j.get("evolution_chain") or {}).get("url")}
+        return self._cached(f"species_v2/{sp}", build)
 
     def _normalize_pokemon(self, j: dict, display: str | None = None) -> dict:
         moves = {}
@@ -110,6 +158,7 @@ class LiveProvider:
             "types": [t["type"]["name"] for t in sorted(j["types"], key=lambda t: t["slot"])],
             "base": {STAT_KEYS[s["stat"]["name"]]: s["base_stat"] for s in j["stats"]},
             "abilities": [a["ability"]["name"] for a in sorted(j["abilities"], key=lambda a: a["slot"])],
+            "hidden_abilities": [a["ability"]["name"] for a in j["abilities"] if a.get("is_hidden")],
             "moves": moves,
             "sprite": art or spr.get("front_default"),
         }
@@ -140,7 +189,7 @@ class LiveProvider:
                 except Exception:
                     pass
             return p
-        return self._cached(f"pokemon/{entry['pokemon']}", build)
+        return self._cached(f"pokemon_v2/{entry['pokemon']}", build)
 
     def pokemon_many(self, entries, workers: int = 8) -> list[dict]:
         with ThreadPoolExecutor(workers) as ex:
@@ -160,10 +209,55 @@ class LiveProvider:
             return {r["name"]: int(r["url"].rstrip("/").split("/")[-1]) for r in j["results"]}
         return self._cached("species_ids", build)
 
+    def pokemon_ids(self) -> dict:
+        """{pokemon/form slug: pokemon id} for every form known to PokeAPI (incl. megas) — one call."""
+        def build():
+            return {r["name"]: int(r["url"].rstrip("/").split("/")[-1])
+                    for r in self._get("pokemon?limit=5000")["results"]}
+        return self._cached("pokemon_ids", build)
+
     def all_pokemon_names(self) -> list:
-        """Every pokemon/form slug known to PokeAPI (incl. megas) — one call, cached."""
-        return self._cached("pokemon_names",
-                            lambda: [r["name"] for r in self._get("pokemon?limit=5000")["results"]])
+        return list(self.pokemon_ids())
+
+    def sprite_url(self, entry: dict, small: bool = False) -> str | None:
+        """Artwork URL without downloading the Pokémon (uses the id tables)."""
+        try:
+            pid = self.pokemon_ids().get(entry["pokemon"]) or self.species_ids().get(entry["species"])
+        except Exception:
+            pid = entry.get("dex")
+        if not pid:
+            return None
+        base = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon"
+        return f"{base}/{pid}.png" if small else f"{base}/other/official-artwork/{pid}.png"
+
+    # ---------- evolutions ----------
+    def evolution_chain(self, species: str) -> dict | None:
+        """Nested {species, id, details[], evolves_to[]} for the species' family."""
+        sp = self.species(species)
+        if not sp.get("chain"):
+            return None
+        cid = sp["chain"].rstrip("/").split("/")[-1]
+
+        def build():
+            def walk(node):
+                return {"species": node["species"]["name"],
+                        "id": int(node["species"]["url"].rstrip("/").split("/")[-1]),
+                        "details": [evo_condition(d) for d in node.get("evolution_details", [])],
+                        "evolves_to": [walk(n) for n in node.get("evolves_to", [])]}
+            return walk(self._get(f"evolution-chain/{cid}")["chain"])
+        return self._cached(f"evolution/{cid}", build)
+
+    # ---------- abilities ----------
+    def ability(self, name: str) -> dict:
+        def build():
+            j = self._get(f"ability/{name}")
+            eng = [e for e in j.get("effect_entries", []) if e["language"]["name"] == "en"]
+            short = eng[0]["short_effect"] if eng else ""
+            if not short:
+                ft = [f for f in j.get("flavor_text_entries", []) if f["language"]["name"] == "en"]
+                short = ft[-1]["flavor_text"] if ft else ""
+            return {"name": name, "display": pretty(name), "desc": " ".join(short.split())}
+        return self._cached(f"ability/{name}", build)
 
     def roster(self, game: str, include_megas: bool = False) -> list[dict]:
         g = GAMES[game]
@@ -216,10 +310,27 @@ class LiveProvider:
     def move(self, name: str) -> dict:
         def build():
             j = self._get(f"move/{name}")
+            eng = [e for e in j.get("effect_entries", []) if e["language"]["name"] == "en"]
+            desc = eng[0]["short_effect"] if eng else ""
+            if j.get("effect_chance") is not None:
+                desc = desc.replace("$effect_chance", str(j["effect_chance"]))
+            if not desc:
+                ft = [f for f in j.get("flavor_text_entries", []) if f["language"]["name"] == "en"]
+                desc = ft[-1]["flavor_text"] if ft else ""
             return {"name": j["name"], "display": pretty(j["name"]), "type": j["type"]["name"],
                     "power": j.get("power"), "accuracy": j.get("accuracy"), "pp": j.get("pp"),
-                    "priority": j.get("priority", 0), "category": j["damage_class"]["name"]}
-        return self._cached(f"move/{name}", build)
+                    "priority": j.get("priority", 0), "category": j["damage_class"]["name"],
+                    "desc": " ".join(desc.split())}
+        return self._cached(f"move_v2/{name}", build)
+
+    def moves_many(self, names, workers: int = 12) -> dict:
+        def one(n):
+            try:
+                return n, self.move(n)
+            except Exception:
+                return n, None
+        with ThreadPoolExecutor(workers) as ex:
+            return {n: m for n, m in ex.map(one, names) if m}
 
     def move_index(self) -> dict:
         """{move: {'type','category'}} from 18 type + 3 damage-class calls (cheap)."""
@@ -265,7 +376,7 @@ class DemoProvider(LiveProvider):
         if key not in self.d.POKEMON:
             raise NotFound(key)
         p = dict(self.d.POKEMON[key])
-        p.update({"name": key, "species": key, "id": 0, "sprite": None,
+        p.update({"name": key, "species": key, "id": 0, "sprite": None, "hidden_abilities": [],
                   "moves": {m: ["demo"] for m in p["moves"]}})
         return p
 
@@ -276,10 +387,22 @@ class DemoProvider(LiveProvider):
         t, c, pw = self.d.MOVES[name]
         return {"name": name, "display": pretty(name), "type": t, "power": pw, "accuracy": 100,
                 "pp": 10, "priority": 1 if name in ("extreme-speed", "sucker-punch", "fake-out") else 0,
-                "category": c}
+                "category": c, "desc": ""}
 
     def move_index(self):
         return {k: {"type": t, "category": c} for k, (t, c, _) in self.d.MOVES.items()}
+
+    def moves_many(self, names, workers=1):
+        return {n: self.move(n) for n in names if n in self.d.MOVES}
+
+    def ability(self, name):
+        return {"name": name, "display": pretty(name), "desc": ""}
+
+    def sprite_url(self, entry, small=False):
+        return None
+
+    def evolution_chain(self, species):
+        return None
 
     def learnset(self, pkmn, game):
         return sorted(pkmn["moves"])

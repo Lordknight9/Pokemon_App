@@ -19,7 +19,8 @@ import streamlit as st
 
 from core.analysis import (CRITERIA, QUAD_CRITERIA, SYN_LABEL, SYN_WEIGHTS, build_profile, damage_matrix,
                            quad_criteria, single_criteria, synergy_dataset, synergy_matrix)
-from core.damage import ITEMS, Battler, Field, Move, calc, ko_text
+from core.damage import (ATTACKER_ABILITIES, CALC_ABILITIES, DEFENDER_ABILITIES, ITEMS, Battler, Field, Move, calc,
+                         intimidate_stage, ko_text)
 from core.data import DemoProvider, LiveProvider, pretty
 from core.mcda import PREF_FUNCS, promethee, spearman, topsis
 from core.rosters import GAMES
@@ -57,21 +58,28 @@ def _text_on(hex_color: str) -> str:
     return "#222" if (0.299 * r + 0.587 * g + 0.114 * b) > 170 else "white"
 
 
-def style_moves(df: pd.DataFrame, move_col: str, type_col: str, cat_col: str):
-    """Colour move names by type and the category cell by physical/special/status."""
-    def row_style(r):
-        out = [""] * len(r)
-        tc = TYPE_COLOR.get(str(r[type_col]).lower())
-        if tc:
-            css = f"background-color:{tc};color:{_text_on(tc)};font-weight:600"
-            out[r.index.get_loc(move_col)] = css
-            out[r.index.get_loc(type_col)] = css
-        cc = CAT_COLOR.get(str(r[cat_col]).lower())
-        if cc:
-            out[r.index.get_loc(cat_col)] = f"background-color:{cc};color:white;font-weight:600"
+def style_moves(df: pd.DataFrame, move_col: str, cat_col: str, types: list):
+    """Colour move names by type (types = list aligned with df rows) and category cells."""
+    types = [str(t).lower() for t in types]
+    mi_, ci_ = df.columns.get_loc(move_col), df.columns.get_loc(cat_col)
+    ti_ = df.columns.get_loc("Τύπος") if "Τύπος" in df.columns else None
+
+    def styles(_):
+        out = pd.DataFrame("", index=df.index, columns=df.columns)
+        for pos, (idx, t) in enumerate(zip(df.index, types)):
+            tc = TYPE_COLOR.get(t)
+            if tc:
+                css = f"background-color:{tc};color:{_text_on(tc)};font-weight:600"
+                out.iat[pos, mi_] = css
+                if ti_ is not None:
+                    out.iat[pos, ti_] = css
+            cc = CAT_COLOR.get(str(df.iat[pos, ci_]).lower())
+            if cc:
+                out.iat[pos, ci_] = f"background-color:{cc};color:white;font-weight:600"
         return out
-    fmt = {c: "{:.1f}" for c in df.columns if df[c].dtype.kind == "f"}
-    return df.style.apply(row_style, axis=1).format(fmt, na_rep="—")
+    floats = [c for c in df.columns if df[c].dtype.kind == "f"]
+    return (df.style.apply(styles, axis=None).format(na_rep="—")
+            .format("{:.1f}", subset=floats, na_rep="—"))
 
 
 def badge(t: str) -> str:
@@ -115,6 +123,27 @@ def get_move(source: str, name: str) -> dict:
     return get_provider(source).move(name)
 
 
+@st.cache_data(show_spinner="Λήψη λεπτομερειών κινήσεων…")
+def get_moves_many(source: str, names: tuple) -> dict:
+    return get_provider(source).moves_many(list(names))
+
+
+@st.cache_data(show_spinner=False)
+def get_ability(source: str, name: str) -> dict:
+    try:
+        return get_provider(source).ability(name)
+    except Exception:
+        return {"name": name, "display": pretty(name), "desc": ""}
+
+
+@st.cache_data(show_spinner=False)
+def get_evolution(source: str, species: str):
+    try:
+        return get_provider(source).evolution_chain(species)
+    except Exception:
+        return None
+
+
 def as_key(e: dict) -> tuple:
     return tuple(sorted(e.items()))
 
@@ -127,23 +156,39 @@ def load_entries(entries: list) -> list:
     return [r for r in res if "error" not in r]
 
 
-# ============================================================ sidebar
+# ============================================================ sidebar (+ URL query params for links)
+PAGES = {"dex": "📘 Pokédex & Stats", "dmg": "💥 Damage Calculator", "rank": "🏆 Κατάταξη Pokémon",
+         "syn": "🤝 Synergy & τετράδες", "info": "ℹ️ Μεθοδολογία"}
+QP = dict(st.query_params)
+
+
+def _qp_index(options: list, key: str, default: int = 0) -> int:
+    v = QP.get(key)
+    return options.index(v) if v in options else default
+
+
 st.sidebar.title("⚔️ Pokémon MCDA Lab")
-src_label = st.sidebar.radio("Πηγή δεδομένων", ["PokeAPI (online)", "Demo (offline, 24 Pokémon)"],
-                             help="Το Demo λειτουργεί χωρίς internet με μικρό ενσωματωμένο dataset.")
-SRC = "demo" if src_label.startswith("Demo") else "live"
+_srcs = ["live", "demo"]
+SRC = st.sidebar.radio("Πηγή δεδομένων", _srcs, index=_qp_index(_srcs, "src"),
+                       format_func=lambda k: "PokeAPI (online)" if k == "live" else "Demo (offline, 24 Pokémon)",
+                       help="Το Demo λειτουργεί χωρίς internet με μικρό ενσωματωμένο dataset.")
 if SRC == "live" and not api_ok("live"):
     st.sidebar.error("Το PokeAPI δεν απαντά. Έλεγξε τη σύνδεση ή διάλεξε Demo.")
 
-GAME = st.sidebar.selectbox("Παιχνίδι", list(GAMES), format_func=lambda g: GAMES[g]["label"])
+GAME = st.sidebar.selectbox("Παιχνίδι", list(GAMES), index=_qp_index(list(GAMES), "game"),
+                            format_func=lambda g: GAMES[g]["label"])
 G = GAMES[GAME]
-LEVEL = st.sidebar.slider("Level", 1, 100, G["default_level"])
-MEGAS = st.sidebar.checkbox("✦ Mega Evolutions", value=(GAME != "sv"), disabled=(GAME == "sv" or SRC == "demo"),
-                            key=f"megas_{GAME}",
+try:
+    _lvl = min(100, max(1, int(QP.get("lvl", G["default_level"]))))
+except ValueError:
+    _lvl = G["default_level"]
+LEVEL = st.sidebar.slider("Level", 1, 100, _lvl)
+MEGAS = st.sidebar.checkbox("✦ Mega Evolutions", value=QP.get("mega", "1" if GAME != "sv" else "0") == "1",
+                            disabled=(GAME == "sv" or SRC == "demo"), key=f"megas_{GAME}",
                             help="Προσθέτει τις Mega μορφές που υπάρχουν στο PokeAPI (Z-A / Champions). "
                                  "Εμφανίζονται με ✦ αμέσως μετά τη βασική μορφή.")
-PAGE = st.sidebar.radio("Σελίδα", ["📘 Pokédex & Stats", "💥 Damage Calculator", "🏆 Κατάταξη Pokémon",
-                                   "🤝 Synergy & τετράδες", "ℹ️ Μεθοδολογία"])
+PAGE_KEY = st.sidebar.radio("Σελίδα", list(PAGES), index=_qp_index(list(PAGES), "page"),
+                            format_func=PAGES.get)
 st.sidebar.caption("Δεδομένα: PokeAPI (pokeapi.co). Rosters Z-A/Champions: ενσωματωμένες λίστες, Σεπτ. 2026.")
 
 try:
@@ -153,16 +198,61 @@ except Exception as ex:
     st.stop()
 BY_NAME = {e["display"]: e for e in ROSTER}
 NAMES = list(BY_NAME)
+IN_ROSTER = list(NAMES)
 N_MEGA = sum(1 for e in ROSTER if e.get("form") == "mega")
 if MEGAS and N_MEGA:
     st.sidebar.caption(f"✦ {N_MEGA} Mega μορφές στη λίστα")
+
+
+def find_name(slug: str | None) -> str | None:
+    """Roster display name for a pokemon or species slug (adds out-of-roster Pokémon on demand)."""
+    if not slug:
+        return None
+    for e in ROSTER:
+        if e["pokemon"] == slug:
+            return e["display"]
+    for e in ROSTER:
+        if e["species"] == slug and not e.get("form"):
+            return e["display"]
+    if SRC == "demo":
+        return None
+    try:
+        dex = get_provider(SRC).species_ids().get(slug)
+    except Exception:
+        dex = None
+    e = {"display": pretty(slug), "species": slug, "pokemon": slug, "form": None, "dex": dex, "extra": True}
+    if e["display"] not in BY_NAME:
+        BY_NAME[e["display"]] = e
+        NAMES.append(e["display"])
+        NAMES.sort(key=lambda n: (BY_NAME[n].get("dex") or 99999, BY_NAME[n].get("form") == "mega", n))
+    return e["display"]
+
+
+def page_link(slug: str) -> str:
+    """URL (query string) that opens the Pokédex page of a Pokémon, keeping the sidebar settings."""
+    return f"?src={SRC}&game={GAME}&lvl={LEVEL}&mega={int(MEGAS)}&page=dex&p={slug}"
+
+
+def sync_url(**extra):
+    q = {"src": SRC, "game": GAME, "lvl": str(LEVEL), "mega": str(int(MEGAS)), "page": PAGE_KEY, **extra}
+    if dict(st.query_params) != q:
+        st.query_params.clear()
+        st.query_params.update(q)
 
 
 def label(name: str) -> str:
     """'#0006 Charizard' / '#0006 ✦ Mega Charizard X' — searchable by number or name."""
     e = BY_NAME.get(name, {})
     num = f"#{e['dex']:04d} " if e.get("dex") else ""
-    return f"{num}{'✦ ' if e.get('form') == 'mega' else ''}{name}"
+    tail = " (εκτός λίστας παιχνιδιού)" if e.get("extra") else ""
+    return f"{num}{'✦ ' if e.get('form') == 'mega' else ''}{name}{tail}"
+
+
+def sprite(entry: dict, small: bool = False) -> str | None:
+    try:
+        return get_provider(SRC).sprite_url(entry, small)
+    except Exception:
+        return None
 
 
 def default_pick(n: int) -> list:
@@ -244,28 +334,81 @@ def show_ranking(res: pd.DataFrame, method: str, label: str):
 
 
 # ============================================================ page 1: Pokédex
+BOX_CSS = """
+<style>
+.pk-row{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;justify-content:center;margin:6px 0 14px}
+.pk-box{display:flex;flex-direction:column;align-items:center;justify-content:center;width:92px;
+  padding:6px 4px;border:2px solid rgba(128,128,128,.35);border-radius:12px;background:rgba(120,140,200,.08);
+  text-decoration:none!important;color:inherit!important;font-size:11px;line-height:1.2;text-align:center}
+.pk-box:hover{border-color:#E3350D;background:rgba(227,53,13,.08)}
+.pk-box img{width:64px;height:64px;object-fit:contain}
+.pk-box.cur{border-color:#E3350D;box-shadow:0 0 0 2px rgba(227,53,13,.25)}
+.pk-box.nav{width:130px;font-size:13px;font-weight:600}
+.pk-box .num{opacity:.65}
+.pk-evo{display:flex;align-items:center;flex-wrap:nowrap;overflow-x:auto;padding:4px 0 10px}
+.pk-evo .col{display:flex;flex-direction:column;gap:10px}
+.pk-evo .step{display:flex;align-items:center}
+.pk-arrow{min-width:110px;max-width:150px;text-align:center;font-size:12px;opacity:.85;padding:0 6px}
+.pk-arrow b{font-size:20px;display:block;line-height:1}
+.pk-tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:8px;margin-left:6px;
+  background:rgba(128,128,128,.18)}
+.pk-abil{margin:4px 0 10px}
+</style>
+"""
+
+
+def box_html(entry: dict | None, cur: bool = False, nav: str = "", big: bool = False) -> str:
+    if not entry:
+        return ""
+    img = sprite(entry)
+    num = f"#{entry['dex']:04d}" if entry.get("dex") else ""
+    mega = "✦ " if entry.get("form") == "mega" else ""
+    pic = f"<img src='{img}' loading='lazy'/>" if img else "<div style='height:64px;line-height:64px'>?</div>"
+    arrow_l = "◀ " if nav == "prev" else ""
+    arrow_r = " ▶" if nav == "next" else ""
+    cls = "pk-box" + (" cur" if cur else "") + (" nav" if nav or big else "")
+    return (f"<a class='{cls}' href='{page_link(entry['pokemon'])}' target='_self'>{pic}"
+            f"<span class='num'>{arrow_l}{num}{arrow_r}</span><span>{mega}{entry['display']}</span></a>")
+
+
+def evo_html(node: dict, current_species: str) -> str:
+    e = {"display": pretty(node["species"]), "species": node["species"], "pokemon": node["species"],
+         "dex": node["id"]}
+    nm = find_name(node["species"])
+    if nm:
+        e = dict(BY_NAME[nm])
+    out = box_html(e, cur=(node["species"] == current_species))
+    kids = node.get("evolves_to") or []
+    if kids:
+        steps = []
+        for k in kids:
+            cond = " / ".join(dict.fromkeys(k["details"])) or "—"
+            steps.append(f"<div class='step'><div class='pk-arrow'><b>➜</b>{cond}</div>"
+                         f"{evo_html(k, current_species)}</div>")
+        out += f"<div class='col'>{''.join(steps)}</div>"
+    return f"<div class='step'>{out}</div>"
+
+
 def page_pokedex():
+    st.markdown(BOX_CSS, unsafe_allow_html=True)
     st.header("📘 Pokédex & Stats")
-    st.caption(f"{G['label']} — {len(NAMES)} Pokémon στη λίστα")
+    st.caption(f"{G['label']} — {len(IN_ROSTER)} Pokémon στη λίστα · πάτα σε εικόνα για να ανοίξει η σελίδα του")
+    start = find_name(QP.get("p")) or default_pick(1)[0]
     name = st.selectbox("Pokémon (γράψε όνομα ή αριθμό Pokédex)", NAMES, format_func=label,
-                        key="dex_pokemon",
-                        index=NAMES.index(default_pick(1)[0]))
+                        key="dex_pokemon", index=NAMES.index(start))
+    entry = BY_NAME[name]
+    sync_url(p=entry["pokemon"])
     try:
-        p = get_pokemon(SRC, BY_NAME[name])
+        p = get_pokemon(SRC, entry)
     except Exception as ex:
         st.error(f"Σφάλμα: {ex}")
         return
-    entry = BY_NAME[name]
     c1, c2 = st.columns([1, 2])
     with c1:
         if p.get("sprite"):
             st.image(p["sprite"], width=220)
         st.markdown(f"**{label(name)}**")
         st.markdown(" ".join(badge(t) for t in p["types"]), unsafe_allow_html=True)
-        if G["has_abilities"]:
-            st.write("**Abilities:** " + ", ".join(pretty(a) for a in p["abilities"]))
-        else:
-            st.caption("Στο Legends Z-A δεν υπάρχουν abilities στη μάχη.")
         st.metric("Base Stat Total", sum(p["base"].values()))
     with c2:
         st.subheader(f"Stats στο Level {LEVEL}")
@@ -296,6 +439,8 @@ def page_pokedex():
         st.dataframe(tbl, width="stretch")
         st.bar_chart(tbl[[f"Lv {LEVEL}"]], horizontal=True)
 
+    abilities_section(p)
+
     st.subheader("Αμυντικό προφίλ τύπων")
     prof = defensive_profile(p["types"], p["abilities"][0] if (p["abilities"] and G["has_abilities"]) else None)
     groups = {"×4": [], "×2": [], "×½": [], "×¼": [], "×0": []}
@@ -307,37 +452,44 @@ def page_pokedex():
         if ts:
             st.markdown(f"**{k}** " + " ".join(badge(t) for t in ts), unsafe_allow_html=True)
 
+    evolution_section(p)
     mega_section(p, entry)
+    moves_section(p)
+    box_navigation(name)
 
-    st.subheader("Κινήσεις (learnset για το παιχνίδι)")
-    mi = get_move_index(SRC)
-    ls = get_provider(SRC).learnset(p, GAME)
-    mv = pd.DataFrame([{"Κίνηση": pretty(m), "Τύπος": mi.get(m, {}).get("type", "?").capitalize(),
-                        "Κατηγορία": mi.get(m, {}).get("category", "?").capitalize()} for m in ls])
-    f1, f2, f3 = st.columns(3)
-    ft = f1.multiselect("Φίλτρο τύπου", sorted(mv["Τύπος"].unique()) if len(mv) else [], key="dex_ft")
-    fc = f2.multiselect("Φίλτρο κατηγορίας", ["Physical", "Special", "Status"], key="dex_fc")
-    if ft:
-        mv = mv[mv["Τύπος"].isin(ft)]
-    if fc:
-        mv = mv[mv["Κατηγορία"].isin(fc)]
-    if f3.checkbox("Power / Accuracy / Priority (περισσότερα requests)"):
-        keep = [m for m in ls if pretty(m) in set(mv["Κίνηση"])]
-        details = {pretty(m): get_move(SRC, m) for m in keep}
-        mv["Power"] = [details[m]["power"] for m in mv["Κίνηση"]]
-        mv["Accuracy"] = [details[m]["accuracy"] for m in mv["Κίνηση"]]
-        mv["Priority"] = [details[m]["priority"] for m in mv["Κίνηση"]]
-    st.markdown(" ".join(cat_badge(c) for c in ("physical", "special", "status")), unsafe_allow_html=True)
-    if len(mv):
-        st.dataframe(style_moves(mv.reset_index(drop=True), "Κίνηση", "Τύπος", "Κατηγορία"),
-                     width="stretch", hide_index=True, height=360)
-    if GAME != "sv":
-        st.caption("Αν το PokeAPI δεν έχει ακόμα learnset για αυτό το παιχνίδι, εμφανίζεται το learnset του "
-                   "Scarlet/Violet (ή όλες οι κινήσεις). Οι Mega μορφές έχουν το learnset της βασικής μορφής.")
+
+def abilities_section(p: dict):
+    st.subheader("Abilities")
+    if not G["has_abilities"]:
+        st.caption("Στο Legends Z-A οι abilities δεν λειτουργούν στη μάχη — εμφανίζονται για αναφορά.")
+    hidden = set(p.get("hidden_abilities", []))
+    rows = []
+    for a in p["abilities"]:
+        info = get_ability(SRC, a)
+        tags = ""
+        if a in hidden:
+            tags += "<span class='pk-tag'>Hidden</span>"
+        if a in CALC_ABILITIES:
+            eff = ATTACKER_ABILITIES.get(a) or DEFENDER_ABILITIES.get(a)
+            tags += f"<span class='pk-tag' title='{eff}'>⚙️ calculator: {eff}</span>"
+        rows.append(f"<div class='pk-abil'><b>{pretty(a)}</b>{tags}<br>"
+                    f"<span style='opacity:.8'>{info.get('desc') or '—'}</span></div>")
+    st.markdown("".join(rows), unsafe_allow_html=True)
+
+
+def evolution_section(p: dict):
+    chain = get_evolution(SRC, p["species"])
+    if not chain:
+        return
+    st.subheader("Evolution line")
+    if not chain.get("evolves_to"):
+        st.caption("Δεν εξελίσσεται.")
+        return
+    st.markdown(f"<div class='pk-evo'>{evo_html(chain, p['species'])}</div>", unsafe_allow_html=True)
 
 
 def mega_section(p: dict, entry: dict):
-    """Show Mega forms of this species (or the base form, if a Mega is selected)."""
+    """Clickable cards for the Mega forms (or the base form, if a Mega is selected) + stat deltas."""
     same = [e for e in ROSTER if e["species"] == entry["species"] and e["display"] != entry["display"]]
     if entry.get("form") == "mega":
         related = sorted(same, key=lambda e: e.get("form") == "mega")
@@ -350,17 +502,10 @@ def mega_section(p: dict, entry: dict):
             st.caption("✦ Ενεργοποίησε «Mega Evolutions» στο sidebar για να δεις τις Mega μορφές.")
         return
     st.subheader(title)
+    st.markdown("<div class='pk-row' style='justify-content:flex-start'>" +
+                box_html(entry, cur=True, big=True) + "".join(box_html(e, big=True) for e in related) +
+                "</div>", unsafe_allow_html=True)
     forms = [p] + [get_pokemon(SRC, e) for e in related]
-    cols = st.columns(len(forms))
-    for c, f in zip(cols, forms):
-        with c:
-            if f.get("sprite"):
-                st.image(f["sprite"], width=140)
-            st.markdown(f"**{f['display']}**<br>" + " ".join(badge(t) for t in f["types"]),
-                        unsafe_allow_html=True)
-            if G["has_abilities"] and f["abilities"]:
-                st.caption("Ability: " + ", ".join(pretty(a) for a in f["abilities"]))
-            st.caption(f"BST {sum(f['base'].values())}")
     comp = pd.DataFrame({f["display"]: f["base"] for f in forms})
     comp.index = [STAT_LABEL[s] for s in comp.index]
     comp.loc["BST"] = comp.sum()
@@ -368,9 +513,80 @@ def mega_section(p: dict, entry: dict):
     for c in comp.columns[1:]:
         comp[f"Δ {c}"] = comp[c] - comp[first]
     delta_cols = [c for c in comp.columns if c.startswith("Δ ")]
+    info = pd.DataFrame({f["display"]: [" / ".join(t.capitalize() for t in f["types"]),
+                                        ", ".join(pretty(a) for a in f["abilities"])] for f in forms},
+                        index=["Τύποι", "Ability"])
+    st.dataframe(info, width="stretch")
     st.dataframe(comp.style.map(lambda v: "color:#1a7f37;font-weight:600" if v > 0 else
                                 "color:#c62828;font-weight:600" if v < 0 else "", subset=delta_cols)
                  .format("{:+d}", subset=delta_cols), width="stretch")
+
+
+def moves_section(p: dict):
+    st.subheader("Κινήσεις (learnset για το παιχνίδι)")
+    mi = get_move_index(SRC)
+    ls = get_provider(SRC).learnset(p, GAME)
+    details = get_moves_many(SRC, tuple(ls))
+    rows = []
+    for m in ls:
+        d = details.get(m) or {}
+        rows.append({"Κίνηση": pretty(m),
+                     "Τύπος": (d.get("type") or mi.get(m, {}).get("type", "?")).capitalize(),
+                     "Κατ.": (d.get("category") or mi.get(m, {}).get("category", "?")).capitalize(),
+                     "Power": d.get("power"), "Acc.": d.get("accuracy"), "PP": d.get("pp"),
+                     "Prio": d.get("priority"), "Περιγραφή": d.get("desc", "")})
+    mv = pd.DataFrame(rows)
+    if mv.empty:
+        st.info("Δεν βρέθηκαν κινήσεις.")
+        return
+    for c in ("Power", "Acc.", "PP", "Prio"):
+        mv[c] = pd.to_numeric(mv[c], errors="coerce").astype("Int64")
+    f1, f2, f3 = st.columns([2, 2, 1])
+    ft = f1.multiselect("Φίλτρο τύπου", sorted(mv["Τύπος"].unique()), key="dex_ft")
+    fc = f2.multiselect("Φίλτρο κατηγορίας", ["Physical", "Special", "Status"], key="dex_fc")
+    show_type = f3.checkbox("Στήλη τύπου", value=False, key="dex_showtype")
+    if ft:
+        mv = mv[mv["Τύπος"].isin(ft)]
+    if fc:
+        mv = mv[mv["Κατ."].isin(fc)]
+    st.markdown(" ".join(cat_badge(c) for c in ("physical", "special", "status")) +
+                "<span style='opacity:.7;font-size:.85em'> · το χρώμα του ονόματος = τύπος κίνησης</span>",
+                unsafe_allow_html=True)
+    mv = mv.reset_index(drop=True)
+    types = mv["Τύπος"].tolist()
+    if not show_type:
+        mv = mv.drop(columns=["Τύπος"])
+    st.dataframe(style_moves(mv, "Κίνηση", "Κατ.", types), hide_index=True, width="stretch",
+                 height=min(38 + 35 * len(mv), 460),
+                 column_config={
+                     "Κίνηση": st.column_config.TextColumn(width="medium"),
+                     "Τύπος": st.column_config.TextColumn(width="small"),
+                     "Κατ.": st.column_config.TextColumn(width="small"),
+                     "Power": st.column_config.NumberColumn(width="small"),
+                     "Acc.": st.column_config.NumberColumn(width="small"),
+                     "PP": st.column_config.NumberColumn(width="small"),
+                     "Prio": st.column_config.NumberColumn(width="small"),
+                     "Περιγραφή": st.column_config.TextColumn(width="large"),
+                 })
+    if GAME != "sv":
+        st.caption("Αν το PokeAPI δεν έχει ακόμα learnset για αυτό το παιχνίδι, εμφανίζεται το learnset του "
+                   "Scarlet/Violet (ή όλες οι κινήσεις). Οι Mega μορφές έχουν το learnset της βασικής μορφής.")
+
+
+def box_navigation(name: str):
+    """Previous / Next like PC-box slots, with the neighbouring Pokémon around the current one."""
+    if name not in IN_ROSTER:
+        return
+    i = IN_ROSTER.index(name)
+    n = len(IN_ROSTER)
+    prev_e = BY_NAME[IN_ROSTER[(i - 1) % n]]
+    next_e = BY_NAME[IN_ROSTER[(i + 1) % n]]
+    window = [IN_ROSTER[(i + k) % n] for k in range(-3, 4)] if n > 7 else IN_ROSTER
+    st.divider()
+    html = ("<div class='pk-row'>" + box_html(prev_e, nav="prev") +
+            "".join(box_html(BY_NAME[x], cur=(x == name)) for x in window) +
+            box_html(next_e, nav="next") + "</div>")
+    st.markdown(html, unsafe_allow_html=True)
 
 
 # ============================================================ page 2: damage calc
@@ -387,7 +603,12 @@ def battler_panel(col, side: str, default_name: str):
                               format_func=lambda k: "✏️ Custom" if k == "custom" else SPREADS[k])
         ability = None
         if G["has_abilities"] and p["abilities"]:
-            ability = c1.selectbox("Ability", p["abilities"], format_func=pretty, key=f"{side}_ab")
+            hidden = set(p.get("hidden_abilities", []))
+            ability = c1.selectbox(
+                "Ability", p["abilities"], key=f"{side}_ab",
+                format_func=lambda a: pretty(a) + (" (H)" if a in hidden else "") +
+                (" ⚙️" if a in CALC_ABILITIES else ""),
+                help="⚙️ = επηρεάζει τον υπολογισμό ζημιάς · (H) = Hidden ability")
         item = c2.selectbox("Item", ITEMS, key=f"{side}_item")
         item = None if item.startswith("(") else item
         tera = None
@@ -413,10 +634,19 @@ def battler_panel(col, side: str, default_name: str):
                     ivs[s] = cc[i].number_input(f"IV {SHORT[s]}", 0, 31, 31, key=f"{side}_iv_{s}")
                 if s != "hp":
                     boosts[s] = cc[i].number_input(f"Boost {SHORT[s]}", -6, 6, 0, key=f"{side}_b_{s}")
+        if ability:
+            eff = (ATTACKER_ABILITIES if side == "a" else DEFENDER_ABILITIES).get(ability)
+            desc = get_ability(SRC, ability).get("desc", "")
+            role = "επιτιθέμενος" if side == "a" else "αμυνόμενος"
+            head = (f"⚙️ **{pretty(ability)}**: {eff}" if eff else
+                    f"**{pretty(ability)}** (δεν επηρεάζει τον υπολογισμό ως {role})")
+            st.caption(head + (f" — {desc}" if desc else ""))
         stats = calc_all(p["base"], lvl, ivs, evs, nature)
-        burned, hp_pct = False, 100.0
+        burned = False
         if side == "a":
-            burned = st.checkbox("Burned", key="a_burn")
+            h1, h2 = st.columns([1, 2])
+            burned = h1.checkbox("Burned", key="a_burn")
+            hp_pct = h2.slider("Τρέχον HP % (για Blaze/Torrent κ.λπ.)", 1, 100, 100, key="a_hp")
         else:
             hp_pct = st.slider("Τρέχον HP %", 1, 100, 100, key="d_hp")
         st.caption(" · ".join(f"{STAT_LABEL[s]} {stats[s]}" for s in STATS))
@@ -431,6 +661,10 @@ def page_damage():
     ca, cd = st.columns(2)
     pa, A = battler_panel(ca, "a", d1)
     pd_, D = battler_panel(cd, "d", d2)
+    if D.ability == "intimidate" and st.checkbox(
+            f"Intimidate του {D.name} ενεργό (Attack επιτιθέμενου {intimidate_stage(A.ability):+d})", value=True):
+        A.boosts = dict(A.boosts)
+        A.boosts["atk"] = max(-6, min(6, A.boosts.get("atk", 0) + intimidate_stage(A.ability)))
 
     st.divider()
     st.subheader("Κίνηση & πεδίο μάχης")
@@ -460,9 +694,12 @@ def page_damage():
     hp = D.stats["hp"]
     cur = max(1, round(hp * D.hp_pct / 100))
 
-    tc = TYPE_COLOR.get(md["type"], "#888")
-    st.markdown(f"### {A.name} — <span style='color:{tc}'>**{pretty(mname)}**</span> {badge(md['type'])}"
+    mtype = r.get("type", md["type"])
+    tc = TYPE_COLOR.get(mtype, "#888")
+    st.markdown(f"### {A.name} — <span style='color:{tc}'>**{pretty(mname)}**</span> {badge(mtype)}"
                 f"{cat_badge(md['category'])} {power} BP → {D.name}", unsafe_allow_html=True)
+    if md.get("desc"):
+        st.caption(md["desc"])
     if r["max"] == 0:
         st.error(r["note"] or "Καμία ζημιά")
         return
@@ -487,7 +724,7 @@ def page_damage():
                          "Min %": rr["min"] / hp * 100, "Max %": rr["max"] / hp * 100,
                          "KO": ko_text(rr["rolls"], cur) if rr["max"] else "—"})
         tab = pd.DataFrame(rows).sort_values("Max %", ascending=False).reset_index(drop=True)
-        st.dataframe(style_moves(tab, "Κίνηση", "Τύπος", "Κατ."), width="stretch", hide_index=True)
+        st.dataframe(style_moves(tab, "Κίνηση", "Κατ.", tab["Τύπος"].tolist()), width="stretch", hide_index=True)
 
 
 # ============================================================ page 3: ranking
@@ -672,5 +909,7 @@ $\Phi(a)=\Phi^+-\Phi^-$. Default: linear με $q=0$ και $p$ = τυπική α
 """)
 
 
-{"📘 Pokédex & Stats": page_pokedex, "💥 Damage Calculator": page_damage, "🏆 Κατάταξη Pokémon": page_ranking,
- "🤝 Synergy & τετράδες": page_synergy, "ℹ️ Μεθοδολογία": page_method}[PAGE]()
+if PAGE_KEY != "dex":
+    sync_url()
+{"dex": page_pokedex, "dmg": page_damage, "rank": page_ranking,
+ "syn": page_synergy, "info": page_method}[PAGE_KEY]()

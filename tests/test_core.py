@@ -30,6 +30,40 @@ def test_recommended_spreads():
     assert "Adamant (+Atk, −SpA)" in spread_text({"atk": 252}, "Adamant")
 
 
+def test_evo_condition():
+    from core.data import evo_condition
+    assert evo_condition({"trigger": {"name": "level-up"}, "min_level": 36}) == "Lv. 36"
+    assert evo_condition({"trigger": {"name": "use-item"}, "item": {"name": "thunder-stone"}}) == "Use Thunder Stone"
+    assert evo_condition({"trigger": {"name": "level-up"}, "min_happiness": 160, "time_of_day": "day"}) == \
+        "Level up high Friendship (Day)"
+    assert evo_condition({"trigger": {"name": "trade"}, "held_item": {"name": "metal-coat"}}) == \
+        "Trade holding Metal Coat"
+
+
+def test_ability_calcs():
+    from core.damage import intimidate_stage
+    st = {"hp": 150, "atk": 150, "def": 100, "spa": 100, "spd": 100, "spe": 100}
+    A = Battler("A", ["normal"], dict(st), 50)
+    D = Battler("D", ["ghost"], dict(st), 50)
+    mv = Move("tackle", "normal", 80, "physical")
+    assert calc(A, D, mv)["max"] == 0
+    A.ability = "scrappy"
+    assert calc(A, D, mv)["max"] > 0
+    A.ability = "pixilate"
+    r = calc(A, D, mv)
+    assert r["type"] == "fairy" and r["stab"] == 1.0
+    D2 = Battler("D2", ["water"], dict(st), 50, "multiscale")
+    A.ability = None
+    full = calc(A, D2, mv)["max"]
+    D2.hp_pct = 50
+    assert calc(A, D2, mv)["max"] > full
+    A.ability = "mold-breaker"
+    D2.hp_pct = 100
+    assert calc(A, D2, mv)["max"] > full
+    assert intimidate_stage("clear-body") == 0 and intimidate_stage("defiant") == 1
+    assert intimidate_stage(None) == -1
+
+
 def test_stats():
     assert calc_stat("hp", 108, 50) == 183
     assert calc_stat("hp", 108, 100, 31, 252) == 420
@@ -124,9 +158,10 @@ FAKE = {
         {"name": "sprigatito", "url": "https://pokeapi.co/api/v2/pokemon-species/906/"},
         {"name": "ogerpon", "url": "https://pokeapi.co/api/v2/pokemon-species/1017/"},
         {"name": "floette", "url": "https://pokeapi.co/api/v2/pokemon-species/670/"}]},
-    "pokemon?limit=5000": {"results": [{"name": n} for n in
-                                       ["charizard", "charizard-mega-x", "charizard-mega-y", "venusaur-mega",
-                                        "floette-eternal", "floette-eternal-mega"]]},
+    "pokemon?limit=5000": {"results": [{"name": n, "url": f"https://pokeapi.co/api/v2/pokemon/{i}/"} for i, n in
+                                       enumerate(["charizard", "charizard-mega-x", "charizard-mega-y",
+                                                  "venusaur-mega", "floette-eternal", "floette-eternal-mega"],
+                                                 start=10000)]},
     "move/overdrive": {"name": "overdrive", "type": {"name": "electric"}, "power": 80, "accuracy": 100,
                        "pp": 10, "priority": 0, "damage_class": {"name": "special"}},
 }
@@ -157,6 +192,8 @@ def test_live_provider_parsing():
         assert [e["pokemon"] for e in fl] == ["floette-eternal", "floette-eternal-mega"]
         assert not any("venusaur" in e["pokemon"] and e["form"] == "mega" for e in ch if e["species"] != "venusaur")
         assert fp.move("overdrive")["category"] == "special"
+        assert fp.sprite_url({"pokemon": "charizard-mega-x", "species": "charizard"}).endswith("/10001.png")
+        assert fp.sprite_url({"pokemon": "sprigatito", "species": "sprigatito"}).endswith("/906.png")
         # cache hit works without the fake API
         FakeProvider._get = lambda self, p: (_ for _ in ()).throw(RuntimeError("no net"))
         assert fp.pokemon(parse_entry("Toxtricity"))["name"] == "toxtricity-amped"
