@@ -14,8 +14,8 @@ from .typechart import TYPES, defensive_profile, super_effective_targets
 # ------------------------------------------------------------------ profiles
 def build_profile(p: dict, level: int, spread: str, learnset: list, move_index: dict,
                   coverage_mode: str = "learnset", use_abilities: bool = True) -> dict:
-    evs, nature = spread_for(p["base"], spread)
-    stats = calc_all(p["base"], level, evs=evs, nature=nature)
+    evs, nature, ivs = spread_for(p["base"], spread)
+    stats = calc_all(p["base"], level, ivs=ivs, evs=evs, nature=nature)
     dmg_types = set(p["types"])
     if coverage_mode == "learnset":
         for m in learnset:

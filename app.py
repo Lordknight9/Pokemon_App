@@ -23,7 +23,8 @@ from core.damage import ITEMS, Battler, Field, Move, calc, ko_text
 from core.data import DemoProvider, LiveProvider, pretty
 from core.mcda import PREF_FUNCS, promethee, spearman, topsis
 from core.rosters import GAMES
-from core.stats import NATURES, SPREADS, STAT_LABEL, STATS, calc_all, spread_for
+from core.stats import (NATURES, SHORT, SPREADS, STAT_LABEL, STATS, calc_all, nature_label, recommended_spread,
+                        spread_for, spread_text)
 from core.typechart import TYPES, defensive_profile
 
 st.set_page_config(page_title="Pokémon MCDA Lab", page_icon="⚔️", layout="wide")
@@ -38,6 +39,39 @@ POPULAR = ["Garchomp", "Incineroar", "Rillaboom", "Amoonguss", "Dragonite", "Gho
            "Tyranitar", "Excadrill", "Pelipper", "Torkoal", "Gardevoir", "Corviknight", "Sneasler",
            "Dragapult", "Whimsicott", "Sinistcha", "Archaludon", "Milotic", "Charizard", "Venusaur",
            "Baxcalibur", "Kommo-o", "Abomasnow"]
+
+
+CAT_COLOR = {"physical": "#E4572E", "special": "#2F6FDB", "status": "#8C8C8C"}
+CAT_ICON = {"physical": "💥", "special": "🌀", "status": "✨"}
+
+
+def cat_badge(c: str) -> str:
+    return (f"<span style='background:{CAT_COLOR.get(c, '#888')};color:white;padding:2px 10px;"
+            f"border-radius:10px;margin-right:4px;font-size:0.85em;font-weight:600'>"
+            f"{CAT_ICON.get(c, '')} {c.capitalize()}</span>")
+
+
+def _text_on(hex_color: str) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return "#222" if (0.299 * r + 0.587 * g + 0.114 * b) > 170 else "white"
+
+
+def style_moves(df: pd.DataFrame, move_col: str, type_col: str, cat_col: str):
+    """Colour move names by type and the category cell by physical/special/status."""
+    def row_style(r):
+        out = [""] * len(r)
+        tc = TYPE_COLOR.get(str(r[type_col]).lower())
+        if tc:
+            css = f"background-color:{tc};color:{_text_on(tc)};font-weight:600"
+            out[r.index.get_loc(move_col)] = css
+            out[r.index.get_loc(type_col)] = css
+        cc = CAT_COLOR.get(str(r[cat_col]).lower())
+        if cc:
+            out[r.index.get_loc(cat_col)] = f"background-color:{cc};color:white;font-weight:600"
+        return out
+    fmt = {c: "{:.1f}" for c in df.columns if df[c].dtype.kind == "f"}
+    return df.style.apply(row_style, axis=1).format(fmt, na_rep="—")
 
 
 def badge(t: str) -> str:
@@ -104,8 +138,10 @@ if SRC == "live" and not api_ok("live"):
 GAME = st.sidebar.selectbox("Παιχνίδι", list(GAMES), format_func=lambda g: GAMES[g]["label"])
 G = GAMES[GAME]
 LEVEL = st.sidebar.slider("Level", 1, 100, G["default_level"])
-MEGAS = st.sidebar.checkbox("Συμπερίληψη Mega μορφών", value=False, disabled=(GAME == "sv" or SRC == "demo"),
-                            help="Προσθέτει τις Mega μορφές που υπάρχουν στο PokeAPI (Z-A / Champions).")
+MEGAS = st.sidebar.checkbox("✦ Mega Evolutions", value=(GAME != "sv"), disabled=(GAME == "sv" or SRC == "demo"),
+                            key=f"megas_{GAME}",
+                            help="Προσθέτει τις Mega μορφές που υπάρχουν στο PokeAPI (Z-A / Champions). "
+                                 "Εμφανίζονται με ✦ αμέσως μετά τη βασική μορφή.")
 PAGE = st.sidebar.radio("Σελίδα", ["📘 Pokédex & Stats", "💥 Damage Calculator", "🏆 Κατάταξη Pokémon",
                                    "🤝 Synergy & τετράδες", "ℹ️ Μεθοδολογία"])
 st.sidebar.caption("Δεδομένα: PokeAPI (pokeapi.co). Rosters Z-A/Champions: ενσωματωμένες λίστες, Σεπτ. 2026.")
@@ -117,6 +153,16 @@ except Exception as ex:
     st.stop()
 BY_NAME = {e["display"]: e for e in ROSTER}
 NAMES = list(BY_NAME)
+N_MEGA = sum(1 for e in ROSTER if e.get("form") == "mega")
+if MEGAS and N_MEGA:
+    st.sidebar.caption(f"✦ {N_MEGA} Mega μορφές στη λίστα")
+
+
+def label(name: str) -> str:
+    """'#0006 Charizard' / '#0006 ✦ Mega Charizard X' — searchable by number or name."""
+    e = BY_NAME.get(name, {})
+    num = f"#{e['dex']:04d} " if e.get("dex") else ""
+    return f"{num}{'✦ ' if e.get('form') == 'mega' else ''}{name}"
 
 
 def default_pick(n: int) -> list:
@@ -124,14 +170,14 @@ def default_pick(n: int) -> list:
     return (pop + [x for x in NAMES if x not in pop])[:n]
 
 
-def synced_multiselect(label: str, store_key: str, default: list, **kw) -> list:
+def synced_multiselect(title: str, store_key: str, default: list, **kw) -> list:
     """Multiselect whose value survives page switches and game changes."""
     wkey = "w_" + store_key
     if wkey in st.session_state:
         st.session_state[wkey] = [x for x in st.session_state[wkey] if x in BY_NAME]
     else:
         st.session_state[wkey] = [x for x in (st.session_state.get(store_key) or default) if x in BY_NAME]
-    val = st.multiselect(label, NAMES, key=wkey, **kw)
+    val = st.multiselect(title, NAMES, key=wkey, format_func=label, **kw)
     st.session_state[store_key] = val
     return val
 
@@ -201,16 +247,20 @@ def show_ranking(res: pd.DataFrame, method: str, label: str):
 def page_pokedex():
     st.header("📘 Pokédex & Stats")
     st.caption(f"{G['label']} — {len(NAMES)} Pokémon στη λίστα")
-    name = st.selectbox("Pokémon", NAMES, index=NAMES.index(default_pick(1)[0]))
+    name = st.selectbox("Pokémon (γράψε όνομα ή αριθμό Pokédex)", NAMES, format_func=label,
+                        key="dex_pokemon",
+                        index=NAMES.index(default_pick(1)[0]))
     try:
         p = get_pokemon(SRC, BY_NAME[name])
     except Exception as ex:
         st.error(f"Σφάλμα: {ex}")
         return
+    entry = BY_NAME[name]
     c1, c2 = st.columns([1, 2])
     with c1:
         if p.get("sprite"):
             st.image(p["sprite"], width=220)
+        st.markdown(f"**{label(name)}**")
         st.markdown(" ".join(badge(t) for t in p["types"]), unsafe_allow_html=True)
         if G["has_abilities"]:
             st.write("**Abilities:** " + ", ".join(pretty(a) for a in p["abilities"]))
@@ -219,20 +269,28 @@ def page_pokedex():
         st.metric("Base Stat Total", sum(p["base"].values()))
     with c2:
         st.subheader(f"Stats στο Level {LEVEL}")
-        a, b = st.columns(2)
-        nature = a.selectbox("Nature", list(NATURES), index=list(NATURES).index("Hardy"))
-        spread = b.selectbox("Έτοιμο spread", ["custom"] + list(SPREADS),
-                             format_func=lambda k: "Custom EVs" if k == "custom" else SPREADS[k])
-        evs, ivs = {}, {}
-        with st.expander("EVs / IVs"):
+        spread = st.selectbox("Spread", list(SPREADS) + ["custom"],
+                              format_func=lambda k: "✏️ Custom (δικά μου EVs / IVs / Nature)" if k == "custom"
+                              else SPREADS[k], key="dex_spread")
+        if spread == "custom":
+            nature = st.selectbox("Nature", list(NATURES), format_func=nature_label,
+                                  index=list(NATURES).index("Hardy"), key="dex_nat")
+            evs, ivs = {}, {}
             cols = st.columns(6)
             for i, s in enumerate(STATS):
-                evs[s] = cols[i].number_input(f"EV {STAT_LABEL[s]}", 0, 252, 0, 4, key=f"ev_{s}")
-                ivs[s] = cols[i].number_input(f"IV {STAT_LABEL[s]}", 0, 31, 31, key=f"iv_{s}")
-        if spread != "custom":
-            evs, nature = spread_for(p["base"], spread)
+                evs[s] = cols[i].number_input(f"EV {SHORT[s]}", 0, 252, 0, 4, key=f"ev_{s}")
+                ivs[s] = cols[i].number_input(f"IV {SHORT[s]}", 0, 31, 31, key=f"iv_{s}")
+            if sum(evs.values()) > 510:
+                st.warning(f"Σύνολο EVs {sum(evs.values())} > 510 (όριο παιχνιδιού).")
+        else:
+            evs, nature, ivs = spread_for(p["base"], spread)
+            if spread == "recommended":
+                st.info(f"**{recommended_spread(p['base'])['role']}** → {spread_text(evs, nature, ivs)}")
+            else:
+                st.caption(spread_text(evs, nature, ivs))
         final = calc_all(p["base"], LEVEL, ivs, evs, nature)
-        tbl = pd.DataFrame({"Base": p["base"], f"Lv {LEVEL}": final,
+        tbl = pd.DataFrame({"Base": p["base"], "EVs": {s: evs.get(s, 0) for s in STATS},
+                            f"Lv {LEVEL}": final,
                             "Lv 100 (max)": calc_all(p["base"], 100, None, {s: 252 for s in STATS})})
         tbl.index = [STAT_LABEL[s] for s in tbl.index]
         st.dataframe(tbl, width="stretch")
@@ -249,33 +307,84 @@ def page_pokedex():
         if ts:
             st.markdown(f"**{k}** " + " ".join(badge(t) for t in ts), unsafe_allow_html=True)
 
+    mega_section(p, entry)
+
     st.subheader("Κινήσεις (learnset για το παιχνίδι)")
     mi = get_move_index(SRC)
     ls = get_provider(SRC).learnset(p, GAME)
-    mv = pd.DataFrame([{"Κίνηση": pretty(m), "Τύπος": mi.get(m, {}).get("type", "?"),
-                        "Κατηγορία": mi.get(m, {}).get("category", "?")} for m in ls])
-    if st.checkbox("Φόρτωση power/accuracy για όλες τις κινήσεις (περισσότερα requests)"):
-        details = [get_move(SRC, m) for m in ls]
-        mv["Power"] = [d["power"] for d in details]
-        mv["Accuracy"] = [d["accuracy"] for d in details]
-        mv["Priority"] = [d["priority"] for d in details]
-    st.dataframe(mv, width="stretch", hide_index=True, height=320)
+    mv = pd.DataFrame([{"Κίνηση": pretty(m), "Τύπος": mi.get(m, {}).get("type", "?").capitalize(),
+                        "Κατηγορία": mi.get(m, {}).get("category", "?").capitalize()} for m in ls])
+    f1, f2, f3 = st.columns(3)
+    ft = f1.multiselect("Φίλτρο τύπου", sorted(mv["Τύπος"].unique()) if len(mv) else [], key="dex_ft")
+    fc = f2.multiselect("Φίλτρο κατηγορίας", ["Physical", "Special", "Status"], key="dex_fc")
+    if ft:
+        mv = mv[mv["Τύπος"].isin(ft)]
+    if fc:
+        mv = mv[mv["Κατηγορία"].isin(fc)]
+    if f3.checkbox("Power / Accuracy / Priority (περισσότερα requests)"):
+        keep = [m for m in ls if pretty(m) in set(mv["Κίνηση"])]
+        details = {pretty(m): get_move(SRC, m) for m in keep}
+        mv["Power"] = [details[m]["power"] for m in mv["Κίνηση"]]
+        mv["Accuracy"] = [details[m]["accuracy"] for m in mv["Κίνηση"]]
+        mv["Priority"] = [details[m]["priority"] for m in mv["Κίνηση"]]
+    st.markdown(" ".join(cat_badge(c) for c in ("physical", "special", "status")), unsafe_allow_html=True)
+    if len(mv):
+        st.dataframe(style_moves(mv.reset_index(drop=True), "Κίνηση", "Τύπος", "Κατηγορία"),
+                     width="stretch", hide_index=True, height=360)
     if GAME != "sv":
         st.caption("Αν το PokeAPI δεν έχει ακόμα learnset για αυτό το παιχνίδι, εμφανίζεται το learnset του "
-                   "Scarlet/Violet (ή όλες οι κινήσεις).")
+                   "Scarlet/Violet (ή όλες οι κινήσεις). Οι Mega μορφές έχουν το learnset της βασικής μορφής.")
+
+
+def mega_section(p: dict, entry: dict):
+    """Show Mega forms of this species (or the base form, if a Mega is selected)."""
+    same = [e for e in ROSTER if e["species"] == entry["species"] and e["display"] != entry["display"]]
+    if entry.get("form") == "mega":
+        related = sorted(same, key=lambda e: e.get("form") == "mega")
+        title = "✦ Βασική μορφή & άλλες Mega"
+    else:
+        related = [e for e in same if e.get("form") == "mega"]
+        title = "✦ Mega Evolutions"
+    if not related:
+        if GAME != "sv" and not MEGAS:
+            st.caption("✦ Ενεργοποίησε «Mega Evolutions» στο sidebar για να δεις τις Mega μορφές.")
+        return
+    st.subheader(title)
+    forms = [p] + [get_pokemon(SRC, e) for e in related]
+    cols = st.columns(len(forms))
+    for c, f in zip(cols, forms):
+        with c:
+            if f.get("sprite"):
+                st.image(f["sprite"], width=140)
+            st.markdown(f"**{f['display']}**<br>" + " ".join(badge(t) for t in f["types"]),
+                        unsafe_allow_html=True)
+            if G["has_abilities"] and f["abilities"]:
+                st.caption("Ability: " + ", ".join(pretty(a) for a in f["abilities"]))
+            st.caption(f"BST {sum(f['base'].values())}")
+    comp = pd.DataFrame({f["display"]: f["base"] for f in forms})
+    comp.index = [STAT_LABEL[s] for s in comp.index]
+    comp.loc["BST"] = comp.sum()
+    first = comp.columns[0]
+    for c in comp.columns[1:]:
+        comp[f"Δ {c}"] = comp[c] - comp[first]
+    delta_cols = [c for c in comp.columns if c.startswith("Δ ")]
+    st.dataframe(comp.style.map(lambda v: "color:#1a7f37;font-weight:600" if v > 0 else
+                                "color:#c62828;font-weight:600" if v < 0 else "", subset=delta_cols)
+                 .format("{:+d}", subset=delta_cols), width="stretch")
 
 
 # ============================================================ page 2: damage calc
 def battler_panel(col, side: str, default_name: str):
     with col:
         st.subheader("Επιτιθέμενος" if side == "a" else "Αμυνόμενος")
-        name = st.selectbox("Pokémon", NAMES, index=NAMES.index(default_name), key=f"{side}_name")
+        name = st.selectbox("Pokémon", NAMES, index=NAMES.index(default_name), key=f"{side}_name",
+                            format_func=label)
         p = get_pokemon(SRC, BY_NAME[name])
         st.markdown(" ".join(badge(t) for t in p["types"]), unsafe_allow_html=True)
         c1, c2 = st.columns(2)
         lvl = c1.number_input("Level", 1, 100, LEVEL, key=f"{side}_lvl")
-        nature = c2.selectbox("Nature", list(NATURES), key=f"{side}_nat",
-                              index=list(NATURES).index("Adamant" if side == "a" else "Hardy"))
+        spread = c2.selectbox("Spread", list(SPREADS) + ["custom"], key=f"{side}_spread",
+                              format_func=lambda k: "✏️ Custom" if k == "custom" else SPREADS[k])
         ability = None
         if G["has_abilities"] and p["abilities"]:
             ability = c1.selectbox("Ability", p["abilities"], format_func=pretty, key=f"{side}_ab")
@@ -283,17 +392,27 @@ def battler_panel(col, side: str, default_name: str):
         item = None if item.startswith("(") else item
         tera = None
         if G["has_tera"]:
-            t = c1.selectbox("Tera type", ["—"] + TYPES, key=f"{side}_tera")
+            t = c1.selectbox("Tera type", ["—"] + TYPES, key=f"{side}_tera", format_func=str.capitalize)
             tera = None if t == "—" else t
-        with st.expander("EVs / IVs / Boosts"):
-            evs, ivs, boosts = {}, {}, {}
+        if spread == "custom":
+            nature = c2.selectbox("Nature", list(NATURES), key=f"{side}_nat", format_func=nature_label,
+                                  index=list(NATURES).index("Adamant" if side == "a" else "Hardy"))
+        else:
+            evs, nature, ivs = spread_for(p["base"], spread)
+            st.caption(("⭐ " + recommended_spread(p["base"])["role"] + ": " if spread == "recommended" else "")
+                       + spread_text(evs, nature, ivs))
+        with st.expander("EVs / IVs / Boosts" if spread == "custom" else "Boosts"):
+            boosts = {}
+            if spread == "custom":
+                evs, ivs = {}, {}
             cc = st.columns(6)
             for i, s in enumerate(STATS):
-                d_ev = 252 if (side == "a" and s in ("atk", "spe")) or (side == "d" and s == "hp") else 0
-                evs[s] = cc[i].number_input(f"EV {STAT_LABEL[s]}", 0, 252, d_ev, 4, key=f"{side}_ev_{s}")
-                ivs[s] = cc[i].number_input(f"IV {STAT_LABEL[s]}", 0, 31, 31, key=f"{side}_iv_{s}")
+                if spread == "custom":
+                    d_ev = 252 if (side == "a" and s in ("atk", "spe")) or (side == "d" and s == "hp") else 0
+                    evs[s] = cc[i].number_input(f"EV {SHORT[s]}", 0, 252, d_ev, 4, key=f"{side}_ev_{s}")
+                    ivs[s] = cc[i].number_input(f"IV {SHORT[s]}", 0, 31, 31, key=f"{side}_iv_{s}")
                 if s != "hp":
-                    boosts[s] = cc[i].number_input(f"Boost {STAT_LABEL[s]}", -6, 6, 0, key=f"{side}_b_{s}")
+                    boosts[s] = cc[i].number_input(f"Boost {SHORT[s]}", -6, 6, 0, key=f"{side}_b_{s}")
         stats = calc_all(p["base"], lvl, ivs, evs, nature)
         burned, hp_pct = False, 100.0
         if side == "a":
@@ -320,7 +439,9 @@ def page_damage():
         st.warning("Δεν βρέθηκαν επιθετικές κινήσεις.")
         return
     c1, c2, c3, c4 = st.columns(4)
-    mname = c1.selectbox("Κίνηση", moves, format_func=pretty)
+    mi = get_move_index(SRC)
+    mname = c1.selectbox("Κίνηση", moves, format_func=lambda m: f"{pretty(m)} · "
+                         f"{mi.get(m, {}).get('type', '?').capitalize()} {CAT_ICON.get(mi.get(m, {}).get('category'), '')}")
     md = get_move(SRC, mname)
     power = c2.number_input("Power", 1, 300, int(md["power"] or 60),
                             help="Αλλάξτε για κινήσεις με μεταβλητή δύναμη.")
@@ -339,8 +460,9 @@ def page_damage():
     hp = D.stats["hp"]
     cur = max(1, round(hp * D.hp_pct / 100))
 
-    st.markdown(f"### {A.name} — **{pretty(mname)}** {badge(md['type'])} ({md['category']}, {power} BP) "
-                f"→ {D.name}", unsafe_allow_html=True)
+    tc = TYPE_COLOR.get(md["type"], "#888")
+    st.markdown(f"### {A.name} — <span style='color:{tc}'>**{pretty(mname)}**</span> {badge(md['type'])}"
+                f"{cat_badge(md['category'])} {power} BP → {D.name}", unsafe_allow_html=True)
     if r["max"] == 0:
         st.error(r["note"] or "Καμία ζημιά")
         return
@@ -360,11 +482,12 @@ def page_damage():
             if not d["power"]:
                 continue
             rr = calc(A, D, Move(m, d["type"], d["power"], d["category"], spread), fld)
-            rows.append({"Κίνηση": pretty(m), "Τύπος": d["type"], "Κατ.": d["category"], "Power": d["power"],
+            rows.append({"Κίνηση": pretty(m), "Τύπος": d["type"].capitalize(), "Κατ.": d["category"].capitalize(),
+                         "Power": d["power"],
                          "Min %": rr["min"] / hp * 100, "Max %": rr["max"] / hp * 100,
                          "KO": ko_text(rr["rolls"], cur) if rr["max"] else "—"})
-        st.dataframe(pd.DataFrame(rows).sort_values("Max %", ascending=False).round(1),
-                     width="stretch", hide_index=True)
+        tab = pd.DataFrame(rows).sort_values("Max %", ascending=False).reset_index(drop=True)
+        st.dataframe(style_moves(tab, "Κίνηση", "Τύπος", "Κατ."), width="stretch", hide_index=True)
 
 
 # ============================================================ page 3: ranking
@@ -467,7 +590,7 @@ def page_synergy():
                  na_rep="—"), width="stretch")
 
     with st.expander("Δημιουργία synergy dataset για μεγαλύτερη λίστα (π.χ. όλα τα υποψήφια της κατάταξης)"):
-        pool = st.multiselect("Pokémon", NAMES, key="pool",
+        pool = st.multiselect("Pokémon", NAMES, key="pool", format_func=label,
                               default=[n for n in (st.session_state.get("rank_names") or team_names)
                                        if n in BY_NAME])
         if st.button("Δημιουργία dataset") and len(pool) >= 2:

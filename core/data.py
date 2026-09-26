@@ -25,6 +25,11 @@ STAT_KEYS = {"hp": "hp", "attack": "atk", "defense": "def", "special-attack": "s
              "special-defense": "spd", "speed": "spe"}
 
 
+def sort_roster(entries: list) -> list:
+    """National dex order; Mega forms right after their base form."""
+    return sorted(entries, key=lambda e: (e.get("dex") or 99999, e.get("form") == "mega", e["display"]))
+
+
 class NotFound(Exception):
     pass
 
@@ -61,7 +66,7 @@ class LiveProvider:
         return val
 
     def _get(self, path: str) -> dict:
-        url = f"{API}/{path.strip('/')}/"
+        url = f"{API}/{path.strip('/')}" + ("" if "?" in path else "/")
         last = None
         for attempt in range(3):
             try:
@@ -148,6 +153,18 @@ class LiveProvider:
             return {"error": str(ex), "display": e["display"] if isinstance(e, dict) else e}
 
     # ---------- rosters ----------
+    def species_ids(self) -> dict:
+        """{species_slug: national dex number} — one API call, cached."""
+        def build():
+            j = self._get("pokemon-species?limit=3000")
+            return {r["name"]: int(r["url"].rstrip("/").split("/")[-1]) for r in j["results"]}
+        return self._cached("species_ids", build)
+
+    def all_pokemon_names(self) -> list:
+        """Every pokemon/form slug known to PokeAPI (incl. megas) — one call, cached."""
+        return self._cached("pokemon_names",
+                            lambda: [r["name"] for r in self._get("pokemon?limit=5000")["results"]])
+
     def roster(self, game: str, include_megas: bool = False) -> list[dict]:
         g = GAMES[game]
         if g["pokedexes"]:
@@ -164,24 +181,36 @@ class LiveProvider:
             entries = self._cached(f"roster/{game}", build)
         else:
             entries = static_roster(game)
+        entries = [dict(e) for e in entries]
         if include_megas:
-            entries = entries + self.mega_entries(entries)
-        return entries
+            entries += self.mega_entries(entries)
+        try:
+            ids = self.species_ids()
+        except Exception:
+            ids = {}
+        for e in entries:
+            e["dex"] = ids.get(e["species"])
+        return sort_roster(entries)
 
-    def mega_entries(self, entries, workers: int = 8) -> list[dict]:
-        base = [e for e in entries if not e.get("form")]
-
-        def one(e):
-            try:
-                sp = self.species(e["species"])
-            except Exception:
-                return []
-            return [{"display": "Mega " + pretty(v.replace("-mega", "")),
-                     "species": e["species"], "pokemon": v, "form": "mega"}
-                    for v in sp["varieties"] if "-mega" in v]
-        with ThreadPoolExecutor(workers) as ex:
-            res = list(ex.map(one, base))
-        return [m for lst in res for m in lst]
+    def mega_entries(self, entries) -> list[dict]:
+        species = {e["species"] for e in entries}
+        try:
+            names = self.all_pokemon_names()
+        except Exception:
+            return []
+        out = []
+        for n in names:
+            if "-mega" not in n:
+                continue
+            base, _, suffix = n.partition("-mega")
+            parts = base.split("-")
+            sp = next(("-".join(parts[:k]) for k in range(len(parts), 0, -1)
+                       if "-".join(parts[:k]) in species), None)
+            if not sp:
+                continue
+            disp = "Mega " + pretty(base) + ((" " + pretty(suffix.strip("-"))) if suffix.strip("-") else "")
+            out.append({"display": disp, "species": sp, "pokemon": n, "form": "mega"})
+        return out
 
     # ---------- moves ----------
     def move(self, name: str) -> dict:
@@ -228,8 +257,8 @@ class DemoProvider(LiveProvider):
         return True
 
     def roster(self, game, include_megas=False):
-        return [{"display": v["display"], "species": k, "pokemon": k, "form": None}
-                for k, v in self.d.POKEMON.items()]
+        return sort_roster([{"display": v["display"], "species": k, "pokemon": k, "form": None,
+                             "dex": v.get("dex")} for k, v in self.d.POKEMON.items()])
 
     def pokemon(self, entry):
         key = entry["pokemon"] if isinstance(entry, dict) else entry

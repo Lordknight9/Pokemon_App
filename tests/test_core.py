@@ -19,6 +19,17 @@ from core.stats import calc_stat  # noqa: E402
 from core.typechart import effectiveness  # noqa: E402
 
 
+def test_recommended_spreads():
+    from core.stats import recommended_spread, spread_text
+    r = recommended_spread({"hp": 108, "atk": 130, "def": 95, "spa": 80, "spd": 85, "spe": 102})
+    assert r["nature"] == "Jolly" and r["evs"]["atk"] == 252
+    r = recommended_spread({"hp": 130, "atk": 140, "def": 105, "spa": 45, "spd": 80, "spe": 40})
+    assert r["ivs"] == {"spe": 0}
+    r = recommended_spread({"hp": 114, "atk": 85, "def": 70, "spa": 85, "spd": 80, "spe": 30})
+    assert "wall" in r["role"] or "Trick Room" in r["role"]
+    assert "Adamant (+Atk, −SpA)" in spread_text({"atk": 252}, "Adamant")
+
+
 def test_stats():
     assert calc_stat("hp", 108, 50) == 183
     assert calc_stat("hp", 108, 100, 31, 252) == 420
@@ -108,6 +119,14 @@ FAKE = {
     "pokedex/kitakami": {"pokemon_entries": [{"pokemon_species": {"name": "sprigatito"}},
                                              {"pokemon_species": {"name": "ogerpon"}}]},
     "pokedex/blueberry": {"pokemon_entries": []},
+    "pokemon-species?limit=3000": {"results": [
+        {"name": "charizard", "url": "https://pokeapi.co/api/v2/pokemon-species/6/"},
+        {"name": "sprigatito", "url": "https://pokeapi.co/api/v2/pokemon-species/906/"},
+        {"name": "ogerpon", "url": "https://pokeapi.co/api/v2/pokemon-species/1017/"},
+        {"name": "floette", "url": "https://pokeapi.co/api/v2/pokemon-species/670/"}]},
+    "pokemon?limit=5000": {"results": [{"name": n} for n in
+                                       ["charizard", "charizard-mega-x", "charizard-mega-y", "venusaur-mega",
+                                        "floette-eternal", "floette-eternal-mega"]]},
     "move/overdrive": {"name": "overdrive", "type": {"name": "electric"}, "power": 80, "accuracy": 100,
                        "pp": 10, "priority": 0, "damage_class": {"name": "special"}},
 }
@@ -131,7 +150,12 @@ def test_live_provider_parsing():
         m = fp.pokemon({"display": "Mega Charizard X", "species": "charizard",
                         "pokemon": "charizard-mega-x", "form": "mega"})
         assert m["types"] == ["fire", "dragon"] and "flamethrower" in m["moves"]
-        assert [e["species"] for e in fp.roster("sv")] == ["sprigatito", "ogerpon"]
+        assert [(e["dex"], e["species"]) for e in fp.roster("sv")] == [(906, "sprigatito"), (1017, "ogerpon")]
+        ch = fp.roster("champions", include_megas=True)
+        assert [e["display"] for e in ch[:3]] == ["Charizard", "Mega Charizard X", "Mega Charizard Y"]
+        fl = [e for e in ch if e["species"] == "floette"]
+        assert [e["pokemon"] for e in fl] == ["floette-eternal", "floette-eternal-mega"]
+        assert not any("venusaur" in e["pokemon"] and e["form"] == "mega" for e in ch if e["species"] != "venusaur")
         assert fp.move("overdrive")["category"] == "special"
         # cache hit works without the fake API
         FakeProvider._get = lambda self, p: (_ for _ in ()).throw(RuntimeError("no net"))
