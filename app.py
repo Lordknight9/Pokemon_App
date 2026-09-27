@@ -22,6 +22,7 @@ from core.analysis import (CRITERIA, QUAD_CRITERIA, SYN_LABEL, SYN_WEIGHTS, buil
 from core.damage import (ATTACKER_ABILITIES, CALC_ABILITIES, DEFENDER_ABILITIES, ITEMS, Battler, Field, Move, calc,
                          intimidate_stage, ko_text)
 from core.data import DemoProvider, LiveProvider, pretty
+from core import donuts as dn
 from core import ml
 from core.move_flags import FLAG_LABEL, sd_id
 from core.usage import Usage
@@ -184,7 +185,7 @@ def load_entries(entries: list) -> list:
 
 # ============================================================ sidebar (+ URL query params for links)
 PAGES = {"dex": "📘 Pokédex & Stats", "dmg": "💥 Damage Calculator", "rank": "🏆 Κατάταξη Pokémon",
-         "mate": "🎯 VGC συμπαίκτες (ML)", "syn": "🤝 Synergy & τετράδες", "info": "ℹ️ Μεθοδολογία"}
+         "mate": "🎯 VGC συμπαίκτες (ML)", "syn": "🤝 Synergy & τετράδες", "donut": "🍩 Donuts (Z-A)", "info": "ℹ️ Μεθοδολογία"}
 QP = dict(st.query_params)
 
 
@@ -1162,6 +1163,172 @@ def page_mates():
         st.success("Έτοιμο — άνοιξε τη σελίδα «🤝 Synergy & τετράδες» από το sidebar.")
 
 
+# ============================================================ page: Z-A donuts
+@st.cache_data(show_spinner=False, max_entries=200)
+def cached_donut_search(targets: tuple, n: int, min_stars: int, allowed: tuple, prefer: str,
+                        exact_stars: int | None = None, dominant: str | None = None, top: int = 8) -> list:
+    return dn.search(dict(targets), n=n, min_stars=min_stars, exact_stars=exact_stars, allowed=list(allowed),
+                     dominant=dominant, prefer=prefer, top=top)
+
+
+def berry_img(name: str) -> str:
+    base = name.replace("Hyper ", "").lower()
+    return f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/{base}-berry.png"
+
+
+def flavor_bar(fl: dict) -> str:
+    tot = sum(fl.values()) or 1
+    segs = "".join(f"<div title='{f} {v}' style='width:{100 * v / tot:.1f}%;background:{dn.FLAVOR_COLOR[f]}'></div>"
+                   for f, v in fl.items() if v)
+    return f"<div style='display:flex;height:12px;border-radius:6px;overflow:hidden;margin:4px 0'>{segs}</div>"
+
+
+def stars_txt(n: int) -> str:
+    return "★" * n + "☆" * (5 - n)
+
+
+def recipe_html(rec: dict) -> str:
+    parts = []
+    for b, k in sorted(rec.items(), key=lambda kv: (-kv[1], kv[0])):
+        hy = "<b style='color:#E3350D'>H</b>" if dn.BERRIES[b]["hyper"] else ""
+        parts.append(f"<span style='display:inline-flex;align-items:center;margin-right:10px'>"
+                     f"<img src='{berry_img(b)}' style='width:28px;height:28px'/>{hy}<b>{k}×</b>&nbsp;{b}</span>")
+    return "".join(parts)
+
+
+def powers_table(ev: dict) -> pd.DataFrame:
+    rows = []
+    for f, cats in dn.POWERS.items():
+        for c, ps in cats.items():
+            lv = ev["possible"][c]
+            rows.append({"Γεύση": f, "Κατηγορία": c, "Powers": ", ".join(ps),
+                         "Μέγ. level": ("Lv. 1–3" if c == "Sparkling" and lv else (f"Lv. {lv}" if lv else "—"))})
+    return pd.DataFrame(rows)
+
+
+def show_recipes(results: list):
+    if not results:
+        st.warning("Καμία συνταγή δεν πληροί αυτούς τους όρους — δοκίμασε περισσότερα berries, λιγότερα αστέρια "
+                   "ή χαμηλότερο level.")
+        return
+    for i, r in enumerate(results, 1):
+        fl = r["flavors"]
+        poss = [f"{c} {'Lv1–3' if c == 'Sparkling' else f'Lv{v}'}" for c, v in r["possible"].items() if v]
+        st.markdown(
+            f"<div style='border:1px solid rgba(128,128,128,.3);border-radius:12px;padding:8px 12px;margin:6px 0'>"
+            f"<b>#{i}</b> &nbsp; <span style='color:#E8B923;font-size:1.1em'>{stars_txt(r['stars'])}</span> "
+            f"&nbsp; Flavor score <b>{r['score']}</b> · 🔥 {r['calories']} cal · ⬆️ +{r['level']} Lv"
+            f"{' · 🌈 Rainbow' if r['rainbow'] else ''}<br>{recipe_html(r['recipe'])}{flavor_bar(fl)}"
+            f"<span style='font-size:.85em;opacity:.8'>" + " · ".join(f"{f} {v}" for f, v in fl.items() if v) +
+            f"<br>Εφικτά: {', '.join(poss) or '—'}</span></div>", unsafe_allow_html=True)
+
+
+def page_donuts():
+    st.header("🍩 Ansha's Donuts — Legends Z-A: Mega Dimension")
+    st.caption("Κάθε donut φτιάχνεται από 3–8 berries. Άθροισμα γεύσεων = Flavor score → αστέρια (120 / 240 / 350 / "
+               "700 / 960). Τα αστέρια πολλαπλασιάζουν calories και level boost (×1.1 … ×1.5). Τα Flavor Powers "
+               "βγαίνουν τυχαία ανάμεσα σε όσα επιτρέπει το «budget» κάθε γεύσης — η εφαρμογή δείχνει τι είναι εφικτό.")
+    t1, t2, t3, t4 = st.tabs(["🎯 Θέλω effects → συνταγή", "⭐ Συνταγές ανά αστέρια", "🧪 Συνταγή → αποτέλεσμα",
+                              "🫐 Berries"])
+    all_powers = [p for cats in dn.POWERS.values() for ps in cats.values() for p in ps]
+
+    with t1:
+        c1, c2 = st.columns([3, 2])
+        wanted = c1.multiselect("Effects (έως 3, ένα ανά κατηγορία)", all_powers, max_selections=3,
+                                default=["Sparkling Power (Shiny)", "Alpha Power"], key="dn_want",
+                                format_func=lambda p: f"{dn.POWER_TO_CAT[p][0]} · {p}")
+        levels = {}
+        for p in wanted:
+            f, cat = dn.POWER_TO_CAT[p]
+            if cat in levels:
+                st.warning(f"Δύο powers από την ίδια κατηγορία ({cat}) δεν γίνεται — κρατάω το πρώτο.")
+                continue
+            levels[cat] = 3 if cat == "Sparkling" else c2.select_slider(f"Ελάχιστο level · {p}", [1, 2, 3], 3,
+                                                                        key=f"dn_lv_{p}")
+        d1, d2, d3, d4 = st.columns(4)
+        n = d1.slider("Berries", 3, 8, 8, key="dn_n", help="3 στην αρχή, έως 8 με καλύτερο butter.")
+        min_st = d2.select_slider("Ελάχιστα αστέρια", [0, 1, 2, 3, 4, 5], 0, key="dn_minst")
+        prefer = d3.selectbox("Προτίμηση", ["cheap", "calories", "level", "stars"], key="dn_pref",
+                              format_func={"cheap": "Φθηνή (λίγα Hyper)", "calories": "Περισσότερα calories",
+                                           "level": "Μεγαλύτερο level boost", "stars": "Περισσότερα αστέρια"}.get)
+        only_reg = d4.checkbox("Χωρίς Hyper berries", key="dn_reg")
+        own = st.multiselect("Μόνο berries που έχω (κενό = όλα)", dn.NAMES, key="dn_own")
+        allowed = [b for b in (own or dn.NAMES) if not (only_reg and dn.BERRIES[b]["hyper"])]
+        with st.spinner("Δοκιμάζω συνδυασμούς…"):
+            res = cached_donut_search(tuple(sorted(levels.items())), n, min_st, tuple(allowed), prefer)
+        show_recipes(res)
+
+    with t2:
+        st.markdown("Για κάθε αριθμό αστέρων (δηλαδή για κάθε επίπεδο Hyperspace zone), η καλύτερη συνταγή ανά "
+                    "κύρια γεύση.")
+        e1, e2, e3 = st.columns(3)
+        n2 = e1.slider("Berries", 3, 8, 8, key="dn_n2")
+        pref2 = e2.selectbox("Προτίμηση", ["cheap", "calories", "level"], key="dn_pref2",
+                             format_func={"cheap": "Φθηνή (λίγα Hyper)", "calories": "Περισσότερα calories",
+                                          "level": "Μεγαλύτερο level boost"}.get)
+        stars_sel = e3.multiselect("Αστέρια", [1, 2, 3, 4, 5], default=[1, 2, 3, 4, 5], key="dn_st2")
+        rows = []
+        for s_ in stars_sel:
+            for f in dn.FLAVORS:
+                r = cached_donut_search((), n2, 0, tuple(dn.NAMES), pref2, s_, f, 1)
+                if r:
+                    r = r[0]
+                    rows.append({"Αστέρια": stars_txt(s_), "Κύρια γεύση": f, "Συνταγή": dn.recipe_text(r["recipe"]),
+                                 "Score": r["score"], "Calories": r["calories"], "Level +": r["level"],
+                                 "Hyper": sum(k for b, k in r["recipe"].items() if dn.BERRIES[b]["hyper"]),
+                                 "Εφικτά effects": ", ".join(f"{c} Lv{'1–3' if c == 'Sparkling' else v}"
+                                                             for c, v in r["possible"].items() if v)})
+                else:
+                    rows.append({"Αστέρια": stars_txt(s_), "Κύρια γεύση": f, "Συνταγή": "— (δεν γίνεται με "
+                                 f"{n2} berries)"})
+        tab = pd.DataFrame(rows)
+        st.dataframe(tab.style.apply(lambda r: [f"background-color:{dn.FLAVOR_COLOR[r['Κύρια γεύση']]}33"] * len(r),
+                                     axis=1), width="stretch", hide_index=True,
+                     height=min(38 + 35 * len(tab), 900))
+
+    with t3:
+        st.markdown("Διάλεξε berries και ποσότητες:")
+        base = pd.DataFrame({"Berry": ["Hyper Haban", "Hyper Tanga"], "Πλήθος": [4, 4]})
+        ed = st.data_editor(base, num_rows="dynamic", key="dn_edit", width="stretch", column_config={
+            "Berry": st.column_config.SelectboxColumn(options=dn.NAMES, required=True),
+            "Πλήθος": st.column_config.NumberColumn(min_value=1, max_value=8, step=1, required=True)})
+        rec = {}
+        for _, r in ed.dropna().iterrows():
+            rec[r["Berry"]] = rec.get(r["Berry"], 0) + int(r["Πλήθος"])
+        total = sum(rec.values())
+        if total == 0:
+            st.info("Πρόσθεσε berries.")
+        else:
+            if total > 8:
+                st.error(f"{total} berries — το μέγιστο είναι 8.")
+            ev = dn.evaluate(rec)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Αστέρια", stars_txt(ev["stars"]))
+            m2.metric("Flavor score", ev["score"])
+            m3.metric("Calories", ev["calories"], help=f"{ev['base_calories']} × {ev['mult']}")
+            m4.metric("Level boost", f"+{ev['level']}", help=f"{ev['base_level']} × {ev['mult']}")
+            st.markdown(recipe_html(rec) + flavor_bar(ev["flavors"]), unsafe_allow_html=True)
+            st.bar_chart(pd.Series(ev["flavors"], name="Γεύση"))
+            nxt = next((t for t in dn.STAR_THRESHOLDS if t > ev["score"]), None)
+            if nxt:
+                st.caption(f"Χρειάζεσαι +{nxt - ev['score']} flavor score για {stars_txt(ev['stars'] + 1)}.")
+            st.caption(f"Budget: σύνολο {ev['total_budget']} · ανά γεύση " +
+                       ", ".join(f"{f} {b}" for f, b in ev["flavor_budget"].items() if b) +
+                       (" · 🌈 Rainbow (+1 σε όλες)" if ev["rainbow"] else ""))
+            st.dataframe(powers_table(ev), hide_index=True, width="stretch")
+
+    with t4:
+        rows = [{"": berry_img(b), "Berry": b, **dict(zip(dn.FLAVORS, v["flavors"].tolist())),
+                 "Σύνολο": int(v["flavors"].sum()), "Level": v["level"], "Calories": v["calories"],
+                 "Hyper": "✓" if v["hyper"] else ""} for b, v in dn.BERRIES.items()]
+        bt = pd.DataFrame(rows)
+        st.dataframe(bt.style.background_gradient(cmap="Oranges", subset=dn.FLAVORS), hide_index=True,
+                     width="stretch", height=600,
+                     column_config={"": st.column_config.ImageColumn(width="small")})
+    st.caption("Πηγές δεδομένων: Serebii (berries), Game8 (αστέρια & πολλαπλασιαστές), RotomLabs (μοντέλο budget "
+               "για τα Flavor Powers). Τα powers είναι τυχαία στο παιχνίδι — εδώ φαίνεται ποια είναι εφικτά.")
+
+
 # ============================================================ page 5: methodology
 def page_method():
     st.header("ℹ️ Μεθοδολογία")
@@ -1216,4 +1383,4 @@ top-10% recall) και permutation importance. Τελικό σκορ = 0.7·πρ
 if PAGE_KEY != "dex":
     sync_url()
 {"dex": page_pokedex, "dmg": page_damage, "rank": page_ranking,
- "mate": page_mates, "syn": page_synergy, "info": page_method}[PAGE_KEY]()
+ "mate": page_mates, "syn": page_synergy, "donut": page_donuts, "info": page_method}[PAGE_KEY]()
