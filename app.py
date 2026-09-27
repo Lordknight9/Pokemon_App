@@ -13,9 +13,31 @@ from __future__ import annotations
 
 from itertools import combinations
 
+import importlib
+import os
+import sys
+
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+
+def _refresh_core_modules():
+    """Streamlit Cloud re-runs app.py after a git push but may keep old copies of core/*.py in memory
+    (-> AttributeError for new functions). Reload any core module whose file changed since it was loaded."""
+    order = ["typechart", "stats", "move_flags", "rosters", "usage", "damage", "demo_data", "data", "analysis",
+             "mcda", "ml", "donuts"]
+    for name in order:
+        mod = sys.modules.get(f"core.{name}")
+        if mod is None or not getattr(mod, "__file__", None):
+            continue
+        mtime = os.path.getmtime(mod.__file__)
+        if getattr(mod, "_loaded_mtime", None) != mtime:  # unknown or changed -> reload once
+            mod = importlib.reload(mod)
+            mod._loaded_mtime = mtime
+
+
+_refresh_core_modules()
 
 from core.analysis import (CRITERIA, QUAD_CRITERIA, SYN_LABEL, SYN_WEIGHTS, build_profile, damage_matrix,
                            quad_criteria, single_criteria, synergy_dataset, synergy_matrix)
