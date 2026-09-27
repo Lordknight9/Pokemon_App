@@ -190,7 +190,9 @@ class LiveProvider:
                 except Exception:
                     pass
             return p
-        return self._cached(f"pokemon_v2/{entry['pokemon']}", build)
+        p = dict(self._cached(f"pokemon_v2/{entry['pokemon']}", build))
+        p["display"] = entry["display"]  # the cached copy may carry the name from another game's roster
+        return p
 
     def pokemon_many(self, entries, workers: int = 16) -> list[dict]:
         with ThreadPoolExecutor(workers) as ex:

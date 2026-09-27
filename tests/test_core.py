@@ -216,6 +216,9 @@ def test_live_provider_parsing():
         assert fp.move("overdrive")["category"] == "special"
         assert fp.sprite_url({"pokemon": "charizard-mega-x", "species": "charizard"}).endswith("/10001.png")
         assert fp.sprite_url({"pokemon": "sprigatito", "species": "sprigatito"}).endswith("/906.png")
+        # the roster's display name wins over the one stored in the disk cache
+        assert fp.pokemon({"display": "Other Name", "species": "toxtricity", "pokemon": "toxtricity",
+                           "form": None})["display"] == "Other Name"
         # cache hit works without the fake API
         FakeProvider._get = lambda self, p: (_ for _ in ()).throw(RuntimeError("no net"))
         assert fp.pokemon(parse_entry("Toxtricity"))["name"] == "toxtricity-amped"

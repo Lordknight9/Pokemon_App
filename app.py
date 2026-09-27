@@ -113,12 +113,14 @@ def get_roster(source: str, game: str, megas: bool) -> list:
 
 @st.cache_data(show_spinner=False)
 def get_pokemon(source: str, entry: dict) -> dict:
-    return get_provider(source).pokemon(entry)
+    return {**get_provider(source).pokemon(entry), "display": entry["display"]}
 
 
 @st.cache_data(show_spinner="Λήψη δεδομένων από PokeAPI…")
 def get_many(source: str, entries: tuple) -> list:
-    return get_provider(source).pokemon_many([dict(e) for e in entries])
+    ents = [dict(e) for e in entries]
+    res = get_provider(source).pokemon_many(ents)
+    return [{**r, "display": e["display"]} for r, e in zip(res, ents)]
 
 
 @st.cache_data(show_spinner="Λήψη πίνακα κινήσεων (μία φορά)…")
@@ -808,7 +810,7 @@ def page_ranking():
 
     X, dmg = ranking_data(SRC, GAME, LEVEL, tuple(names), spread, int(power), cov)
     if types_f:  # type filter applied after loading (types are known only then)
-        keep = [n for n in X.index if set(get_pokemon(SRC, BY_NAME[n])["types"]) & set(types_f)]
+        keep = [n for n in X.index if n in BY_NAME and set(get_pokemon(SRC, BY_NAME[n])["types"]) & set(types_f)]
         X, dmg = X.loc[keep], dmg.loc[keep, keep]
         st.caption(f"Φίλτρο τύπου: {len(keep)} Pokémon (η επιθετική/αμυντική ισχύς μετράει απέναντι σε όλα).")
         if len(keep) < 3:
@@ -838,8 +840,8 @@ def page_ranking():
     st.subheader("Αποτελέσματα")
     res = run_mcda(Xs, w, ben, funcs, method)
     disp = res.copy()
-    disp.insert(0, "Εικόνα", [sprite(BY_NAME[n], small=True) for n in res.index])
-    disp.index = [label(n) for n in res.index]
+    disp.insert(0, "Εικόνα", [sprite(BY_NAME[n], small=True) if n in BY_NAME else None for n in res.index])
+    disp.index = [label(n) if n in BY_NAME else n for n in res.index]
     show_ranking(disp, method, "pokemon")
     score = res["TOPSIS C*"] if "TOPSIS C*" in res else \
         (res["Φ (net)"] - res["Φ (net)"].min()) / max(res["Φ (net)"].max() - res["Φ (net)"].min(), 1e-9)
