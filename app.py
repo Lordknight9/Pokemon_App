@@ -1171,6 +1171,12 @@ def cached_donut_search(targets: tuple, n: int, min_stars: int, allowed: tuple, 
                      dominant=dominant, prefer=prefer, top=top)
 
 
+@st.cache_data(show_spinner="Ψάχνω συνταγή…", max_entries=100)
+def cached_special_search(donut: str, own: tuple, prefer: str) -> list:
+    d = next(x for x in dn.SPECIAL_DONUTS if x["name"] == donut)
+    return dn.search_special(d["req"], n=8, allowed=list(own) or None, prefer=prefer, top=5)
+
+
 def berry_img(name: str) -> str:
     base = name.replace("Hyper ", "").lower()
     return f"https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/{base}-berry.png"
@@ -1228,8 +1234,8 @@ def page_donuts():
     st.caption("Κάθε donut φτιάχνεται από 3–8 berries. Άθροισμα γεύσεων = Flavor score → αστέρια (120 / 240 / 350 / "
                "700 / 960). Τα αστέρια πολλαπλασιάζουν calories και level boost (×1.1 … ×1.5). Τα Flavor Powers "
                "βγαίνουν τυχαία ανάμεσα σε όσα επιτρέπει το «budget» κάθε γεύσης — η εφαρμογή δείχνει τι είναι εφικτό.")
-    t1, t2, t3, t4 = st.tabs(["🎯 Θέλω effects → συνταγή", "⭐ Συνταγές ανά αστέρια", "🧪 Συνταγή → αποτέλεσμα",
-                              "🫐 Berries"])
+    t1, t2, t5, t3, t4 = st.tabs(["🎯 Θέλω effects → συνταγή", "⭐ Συνταγές ανά αστέρια",
+                                  "🐉 Θρυλικά (special donuts)", "🧪 Συνταγή → αποτέλεσμα", "🫐 Berries"])
     all_powers = [p for cats in dn.POWERS.values() for ps in cats.values() for p in ps]
 
     with t1:
@@ -1315,7 +1321,41 @@ def page_donuts():
             st.caption(f"Budget: σύνολο {ev['total_budget']} · ανά γεύση " +
                        ", ".join(f"{f} {b}" for f, b in ev["flavor_budget"].items() if b) +
                        (" · 🌈 Rainbow (+1 σε όλες)" if ev["rainbow"] else ""))
+            hits = [d for d in dn.SPECIAL_DONUTS if all(ev["flavors"][f] >= v for f, v in d["req"].items())]
+            if hits:
+                st.success("🐉 Αυτή η συνταγή κάνει: " + ", ".join(f"{d['name']} ({d['pokemon']})" for d in hits))
             st.dataframe(powers_table(ev), hide_index=True, width="stretch")
+
+    with t5:
+        st.markdown("Τα special donuts καλούν θρυλικά στο Hyperspace. Χρειάζονται **ελάχιστη τιμή σε κάθε γεύση** "
+                    "(όχι μόνο αστέρια). Οι συνταγές βρίσκονται αυτόματα με ≤ 8 berries.")
+        g1, g2 = st.columns(2)
+        pref5 = g1.selectbox("Προτίμηση", ["cheap", "calories", "level"], key="dn_pref5",
+                             format_func={"cheap": "Λιγότερη «σπατάλη» γεύσης", "calories": "Περισσότερα calories",
+                                          "level": "Μεγαλύτερο level boost"}.get)
+        own5 = g2.multiselect("Μόνο berries που έχω (κενό = όλα)", dn.NAMES, key="dn_own5")
+        art = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/{}.png"
+        dex = {"darkrai": 491, "rayquaza": 384, "groudon": 383, "kyogre": 382, "zeraora": 807}
+        for d in dn.SPECIAL_DONUTS:
+            c_img, c_body = st.columns([1, 4])
+            c_img.image(art.format(dex[d["slug"]]), width=120)
+            with c_body:
+                st.markdown(f"#### {d['name']} → {d['pokemon']}")
+                st.caption(f"Ξεκλειδώνει: {d['unlock']}")
+                req_html = " ".join(
+                    f"<span style='background:{dn.FLAVOR_COLOR[f]};color:white;border-radius:8px;padding:2px 8px;"
+                    f"margin-right:4px;font-weight:600'>{f} ≥ {v}</span>" for f, v in d["req"].items())
+                st.markdown(req_html, unsafe_allow_html=True)
+                res5 = cached_special_search(d["name"], tuple(sorted(own5)), pref5)
+                if not res5:
+                    st.warning("Δεν βγαίνει με αυτά τα berries.")
+                for i, r in enumerate(res5[:3], 1):
+                    st.markdown(f"<div style='margin:4px 0'><b>{i}.</b> {recipe_html(r['recipe'])}"
+                                f"{flavor_bar(r['flavors'])}<span style='font-size:.85em;opacity:.8'>"
+                                + " · ".join(f"{f} {v} (≥{d['req'][f]})" for f, v in r["flavors"].items()) +
+                                f" · {stars_txt(r['stars'])} · 🔥 {r['calories']} cal</span></div>",
+                                unsafe_allow_html=True)
+            st.divider()
 
     with t4:
         rows = [{"": berry_img(b), "Berry": b, **dict(zip(dn.FLAVORS, v["flavors"].tolist())),

@@ -25,7 +25,19 @@ def test_search_respects_targets_and_constraints():
     assert dn.search({"Item": 3, "Sparkling": 3, "Catch": 3, "Move": 1}, n=8) == []   # > 3 powers
 
 
+def test_special_donuts_solvable_with_8_berries():
+    for d in dn.SPECIAL_DONUTS:
+        res = dn.search_special(d["req"], n=8, top=1)
+        assert res, d["name"]
+        r = res[0]
+        assert r["n"] == 8 and all(r["flavors"][f] >= v for f, v in d["req"].items()), d["name"]
+    # Game8's Bad Dreams Cruller recipe meets the requirements with our berry data
+    ev = dn.evaluate({"Hyper Tanga": 3, "Hyper Kasib": 3, "Hyper Coba": 1, "Hyper Yache": 1})
+    assert all(ev["flavors"][f] >= v for f, v in dn.SPECIAL_DONUTS[0]["req"].items())
+
+
 if __name__ == "__main__":
+    test_special_donuts_solvable_with_8_berries()
     test_evaluate_and_stars()
     test_search_respects_targets_and_constraints()
     print("✓ donuts")

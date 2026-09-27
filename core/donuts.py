@@ -277,5 +277,60 @@ def search(targets: dict, n: int = 8, min_stars: int = 0, exact_stars: int | Non
     return out
 
 
+# Special donuts that summon legendary Pokémon (minimum value of every flavour) — Game8
+SPECIAL_DONUTS = [
+    {"name": "Bad Dreams Cruller", "pokemon": "Darkrai", "slug": "darkrai", "unlock": "Hyperspace Mission 11",
+     "req": {"Sweet": 310, "Spicy": 100, "Sour": 310, "Bitter": 40, "Fresh": 40}},
+    {"name": "Delta Old-Fashioned Donut", "pokemon": "Rayquaza", "slug": "rayquaza", "unlock": "Hyperspace Mission 12",
+     "req": {"Sweet": 120, "Spicy": 40, "Sour": 340, "Bitter": 40, "Fresh": 390}},
+    {"name": "Omega Old-Fashioned Donut", "pokemon": "Groudon", "slug": "groudon", "unlock": "Hyperspace Mission 13",
+     "req": {"Sweet": 260, "Spicy": 160, "Sour": 160, "Bitter": 20, "Fresh": 260}},
+    {"name": "Alpha Old-Fashioned Donut", "pokemon": "Kyogre", "slug": "kyogre", "unlock": "Hyperspace Mission 14",
+     "req": {"Sweet": 50, "Spicy": 50, "Sour": 210, "Bitter": 180, "Fresh": 370}},
+    {"name": "Plasma-Glazed Donut", "pokemon": "Zeraora", "slug": "zeraora", "unlock": "Side Mission EX3",
+     "req": {"Sweet": 40, "Spicy": 200, "Sour": 400, "Bitter": 280, "Fresh": 40}},
+]
+
+
+def search_special(req: dict, n: int = 8, allowed: list | None = None, prefer: str = "cheap",
+                   top: int = 8, k: int | None = None) -> list[dict]:
+    """Recipes whose every flavour reaches the special donut's minimum."""
+    allowed = allowed or NAMES
+    r = np.array([req.get(f, 0) for f in FLAVORS], dtype=float)
+    w = r / (r.sum() or 1)
+    k = k or {3: 40, 4: 30, 5: 22, 6: 17, 7: 15, 8: 13}.get(n, 13)
+    idx = [NAMES.index(b) for b in allowed]
+    # relevance: flavour mix close to the requirement mix, plus raw strength
+    M = FLAV_MAT[idx].astype(float)
+    rel = (M @ w) + 0.1 * M.sum(axis=1)
+    cand = [idx[i] for i in np.argsort(-rel)[:k]]
+    # add the strongest berry for every required flavour so each can be covered
+    for fi in range(5):
+        if r[fi]:
+            cand.append(idx[int(np.argmax(M[:, fi]))])
+    cand = list(dict.fromkeys(cand))
+    C = _combos(cand, n)
+    V = _vector_eval(C)
+    ok = (V["fl"] >= r[None, :]).all(axis=1)
+    ids = np.nonzero(ok)[0]
+    if not len(ids):
+        return []
+    keys = {"cheap": (V["hyper"][ids], V["score"][ids]), "calories": (-V["cal"][ids], V["hyper"][ids]),
+            "level": (-V["lvl"][ids], V["hyper"][ids]), "stars": (-V["stars"][ids], -V["score"][ids])}[prefer]
+    order = ids[np.lexsort(keys[::-1])]
+    out, seen = [], set()
+    for i in order:
+        rec = {}
+        for b in C[i]:
+            rec[NAMES[b]] = rec.get(NAMES[b], 0) + 1
+        key = tuple(sorted(rec.items()))
+        if key not in seen:
+            seen.add(key)
+            out.append({"recipe": rec, **evaluate(rec)})
+        if len(out) >= top:
+            break
+    return out
+
+
 def recipe_text(rec: dict) -> str:
     return " + ".join(f"{k}× {b}" for b, k in sorted(rec.items(), key=lambda kv: (-kv[1], kv[0])))
