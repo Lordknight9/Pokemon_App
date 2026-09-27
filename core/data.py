@@ -19,6 +19,7 @@ import requests
 
 from .move_flags import SHOWDOWN_MOVES_URL, fallback_table, parse_showdown, sd_id
 from .rosters import GAMES, parse_entry, static_roster
+from .usage import CUTOFFS, FORMAT_PATTERNS, STATS_ROOT, compact_chaos, formats_in, latest_months
 from .typechart import TYPES
 
 API = "https://pokeapi.co/api/v2"
@@ -348,6 +349,45 @@ class LiveProvider:
     def move_flags(self, slug: str) -> frozenset:
         return frozenset(self.move_flags_table()[0].get(sd_id(slug), []))
 
+    # ---------- Smogon VGC usage stats ----------
+    def _get_text(self, url: str) -> str:
+        r = self.s.get(url, timeout=self.timeout)
+        r.raise_for_status()
+        return r.text
+
+    def smogon_formats(self, game: str) -> list[tuple[str, str]]:
+        """[(month, format)] newest first for the game's VGC formats (listing cached per day)."""
+        import datetime as _dt
+
+        def build():
+            months = latest_months(self._get_text(f"{STATS_ROOT}/"), 4)
+            out = []
+            for mth in months:
+                try:
+                    listing = self._get_text(f"{STATS_ROOT}/{mth}/chaos/")
+                except Exception:
+                    continue
+                out += [(mth, f) for f in formats_in(listing, FORMAT_PATTERNS[game])]
+            return out
+        return [tuple(x) for x in self._cached(f"smogon_formats_{game}_{_dt.date.today()}", build)]
+
+    def smogon_usage(self, month: str, fmt: str, cutoff: str = "1760") -> dict:
+        """Compact chaos stats; tries lower rating cutoffs if the requested one is missing."""
+        def build():
+            last = None
+            for c in [cutoff] + [x for x in CUTOFFS if x != cutoff]:
+                try:
+                    r = self.s.get(f"{STATS_ROOT}/{month}/chaos/{fmt}-{c}.json", timeout=120)
+                    r.raise_for_status()
+                    comp = compact_chaos(r.json())
+                    comp["info"]["cutoff_used"] = c
+                    comp["info"]["month"] = month
+                    return comp
+                except Exception as e:
+                    last = e
+            raise ConnectionError(f"Smogon stats unavailable: {last}")
+        return self._cached(f"smogon_{month}_{fmt}_{cutoff}", build)
+
     def moves_many(self, names, workers: int = 12) -> dict:
         def one(n):
             try:
@@ -425,6 +465,9 @@ class DemoProvider(LiveProvider):
 
     def move_flags_table(self):
         return fallback_table(), "fallback"
+
+    def smogon_formats(self, game):
+        return []
 
     def sprite_url(self, entry, small=False):
         return None

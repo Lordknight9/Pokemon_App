@@ -22,7 +22,9 @@ from core.analysis import (CRITERIA, QUAD_CRITERIA, SYN_LABEL, SYN_WEIGHTS, buil
 from core.damage import (ATTACKER_ABILITIES, CALC_ABILITIES, DEFENDER_ABILITIES, ITEMS, Battler, Field, Move, calc,
                          intimidate_stage, ko_text)
 from core.data import DemoProvider, LiveProvider, pretty
+from core import ml
 from core.move_flags import FLAG_LABEL, sd_id
+from core.usage import Usage
 from core.mcda import PREF_FUNCS, promethee, spearman, topsis
 from core.rosters import GAMES
 from core.stats import (NATURES, SHORT, SPREADS, STAT_LABEL, STATS, calc_all, nature_label, recommended_spread,
@@ -182,7 +184,7 @@ def load_entries(entries: list) -> list:
 
 # ============================================================ sidebar (+ URL query params for links)
 PAGES = {"dex": "📘 Pokédex & Stats", "dmg": "💥 Damage Calculator", "rank": "🏆 Κατάταξη Pokémon",
-         "syn": "🤝 Synergy & τετράδες", "info": "ℹ️ Μεθοδολογία"}
+         "mate": "🎯 VGC συμπαίκτες (ML)", "syn": "🤝 Synergy & τετράδες", "info": "ℹ️ Μεθοδολογία"}
 QP = dict(st.query_params)
 
 
@@ -940,6 +942,226 @@ def page_synergy():
     st.bar_chart(freq, horizontal=True)
 
 
+# ============================================================ page: VGC teammates (usage data + ML)
+@st.cache_data(show_spinner="Αναζήτηση VGC στατιστικών στο Smogon…", ttl=6 * 3600)
+def get_smogon_formats(source: str, game: str) -> list:
+    try:
+        return get_provider(source).smogon_formats(game)
+    except Exception:
+        return []
+
+
+@st.cache_data(show_spinner="Λήψη VGC στατιστικών (Smogon, μία φορά)…")
+def get_smogon_usage(source: str, month: str, fmt: str, cutoff: str) -> dict:
+    return get_provider(source).smogon_usage(month, fmt, cutoff)
+
+
+@st.cache_data(show_spinner="Φόρτωση όλων των Pokémon του παιχνιδιού…", max_entries=6)
+def roster_profiles(src: str, game: str, level: int, names: tuple) -> tuple:
+    ps = load_entries([BY_NAME[n] for n in names])
+    mi = get_move_index(src)
+    prov = get_provider(src)
+    profiles, learn = {}, {}
+    for p in ps:
+        ls = prov.learnset(p, game)
+        profiles[p["display"]] = build_profile(p, level, "recommended", ls, mi, "learnset", G["has_abilities"])
+        learn[p["display"]] = ls
+    return profiles, learn
+
+
+def resolver():
+    """Showdown name ('Ninetales-Alola', 'Floette-Mega') -> roster display name."""
+    idx = {}
+    for e in ROSTER:
+        slug = e["pokemon"]
+        for k in {slug, slug.replace("-eternal", ""), slug.replace("-breed", "")}:
+            idx.setdefault(sd_id(k), e["display"])
+        if not e.get("form"):
+            idx.setdefault(sd_id(e["species"]), e["display"])
+
+    def resolve(name: str):
+        k = sd_id(name)
+        if k in idx:
+            return idx[k]
+        if "-mega" in name.lower():  # Mega not in PokeAPI yet -> count it as its base species
+            return resolve(name[: name.lower().index("-mega")])
+        return None
+    return resolve
+
+
+@st.cache_resource(show_spinner="Εκπαίδευση μοντέλου ML…", max_entries=8)
+def trained_model(src, game, level, month, fmt, cutoff, kind, n_train, _usage, _profiles, _feats):
+    names = [n for n in _usage.top() if n in _profiles][:n_train]
+    X, y, w, idx = ml.training_set(names, _profiles, _feats, _usage)
+    if len(X) < 50:
+        return None
+    res = ml.train_and_evaluate(X, y, w, kind)
+    res.update({"n_pairs": len(X), "n_mons": len(names), "y": y, "idx": idx})
+    return res
+
+
+def reasons(pa, pb, fa, fb, x) -> str:
+    out = []
+    for w, lab in (("rain", "Rain"), ("sun", "Sun"), ("sand", "Sand"), ("snow", "Snow")):
+        if fa[f"set_{w}"] * fb[f"abuse_{w}"] > 0.3:
+            out.append(f"{lab}: {pa['display']} → {pb['display']}")
+        if fb[f"set_{w}"] * fa[f"abuse_{w}"] > 0.3:
+            out.append(f"{lab}: {pb['display']} → {pa['display']}")
+    if x["trickroom_combo"] > 0.3:
+        out.append("Trick Room")
+    if x["tailwind_combo"] > 0.4:
+        out.append("Tailwind")
+    if x["redirect_combo"] > 0.3:
+        out.append("Follow Me / Rage Powder")
+    if x["eq_immune"] > 0.2:
+        out.append("Earthquake + ανοσία Ground")
+    if x["fakeout_sum"] > 0.8:
+        out.append("Fake Out")
+    if x["intimidate_sum"] > 0.5:
+        out.append("Intimidate")
+    if x["terrain_combo"] > 0.3:
+        out.append("Terrain")
+    if x["cover_pairs"] >= 4:
+        out.append(f"καλύπτουν αδυναμίες ({x['cover_pairs']} τύποι)")
+    if x["shared_weak"] >= 3:
+        out.append(f"⚠️ {x['shared_weak']} κοινές αδυναμίες")
+    return " · ".join(out)
+
+
+def page_mates():
+    st.header("🎯 VGC συμπαίκτες με πραγματικά δεδομένα + ML")
+    st.caption("Διάλεξε ένα Pokémon και η εφαρμογή προτείνει με ποια ταιριάζει σε ομάδα VGC. Η «αλήθεια» "
+               "είναι πόσο συχνά εμφανίζονται μαζί στις ομάδες του Showdown ladder (Smogon stats). Ένα μοντέλο "
+               "ML μαθαίνει γιατί (καιρός, Trick Room, Fake Out, τύποι…) και προβλέπει και για ζευγάρια χωρίς δεδομένα.")
+    if SRC == "demo":
+        st.info("Χρειάζεται η πηγή «PokeAPI (online)».")
+        return
+    fmts = get_smogon_formats(SRC, GAME)
+    if not fmts:
+        st.warning("Δεν βρέθηκαν VGC στατιστικά για αυτό το παιχνίδι στο smogon.com/stats.")
+        return
+    c1, c2, c3 = st.columns([2, 1, 2])
+    mf = c1.selectbox("Στατιστικά (μήνας · format)", fmts, format_func=lambda x: f"{x[0]} · {x[1]}")
+    cutoff = c2.selectbox("Rating ≥", ["1760", "1630", "1500", "0"], index=0,
+                          help="Μόνο ομάδες παικτών με rating πάνω από αυτό (καλύτεροι παίκτες = πιο «σωστές» ομάδες).")
+    models = ml.available_models()
+    kind = c3.selectbox("Μοντέλο ML", list(models), format_func=models.get)
+    if GAME == "za":
+        st.caption("Το Legends Z-A δεν έχει VGC ladder — χρησιμοποιούνται τα δεδομένα του Champions ως προσέγγιση.")
+    try:
+        comp = get_smogon_usage(SRC, mf[0], mf[1], cutoff)
+    except Exception as ex:
+        st.error(f"Αποτυχία λήψης στατιστικών: {ex}")
+        return
+    usage = Usage(comp, resolver())
+    profiles, learn = roster_profiles(SRC, GAME, LEVEL, tuple(IN_ROSTER))
+    feats = {n: ml.mon_features(p, usage.detail.get(n), [sd_id(m) for m in learn.get(n, [])])
+             for n, p in profiles.items()}
+    info = comp.get("info", {})
+    st.caption(f"📊 {info.get('metagame', mf[1])} · {mf[0]} · rating ≥ {info.get('cutoff_used', cutoff)} · "
+               f"{info.get('number of battles', 0):,} μάχες · {len(usage.w)} Pokémon με δεδομένα")
+
+    with st.expander("🧠 Μοντέλο ML: πώς εκπαιδεύεται & πόσο καλά προβλέπει", expanded=False):
+        n_train = st.slider("Pokémon για εκπαίδευση (τα πιο χρησιμοποιημένα)", 30, 200, 120, 10)
+        model = trained_model(SRC, GAME, LEVEL, mf[0], mf[1], cutoff, kind, n_train, usage, profiles, feats)
+        if model is None:
+            st.warning("Πολύ λίγα δεδομένα για εκπαίδευση.")
+        else:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("R² (5-fold CV)", f"{model['r2']:.2f}")
+            m2.metric("Spearman ρ", f"{model['spearman']:.2f}")
+            m3.metric("MAE (log₂ lift)", f"{model['mae']:.2f}")
+            m4.metric("Top-10% recall", f"{model['top10_recall'] * 100:.0f}%")
+            st.caption(f"Στόχος: log₂ lift = πόσες φορές πιο συχνά από την τύχη εμφανίζονται μαζί δύο Pokémon · "
+                       f"{model['n_pairs']:,} ζευγάρια από {model['n_mons']} Pokémon · "
+                       "αξιολόγηση σε δεδομένα που το μοντέλο δεν είδε (cross-validation).")
+            imp = model["importances"].head(15).sort_values()
+            st.bar_chart(imp, horizontal=True)
+            st.caption("Permutation importance: πόσο χειροτερεύει η πρόβλεψη αν «ανακατέψουμε» το χαρακτηριστικό.")
+
+    default = next((n for n in ("Archaludon", *usage.top(1)) if n in profiles), list(profiles)[0])
+    a = st.selectbox("Pokémon-άγκυρα", list(profiles), index=list(profiles).index(default), format_func=label,
+                     key="mate_anchor")
+    pa, fa = profiles[a], feats[a]
+    sp_a = BY_NAME[a]["species"]
+    cands = [b for b in profiles if b != a and BY_NAME[b]["species"] != sp_a]
+    rows = [ml.pair_features(pa, profiles[b], fa, feats[b]) for b in cands]
+    X = pd.DataFrame(rows)
+    pred = model["model"].predict(X[model["columns"]]) if model else np.zeros(len(X))
+    out = []
+    for b, x, pr in zip(cands, rows, pred):
+        real = usage.log_lift(a, b)
+        final = pr if real is None else 0.7 * real + 0.3 * pr
+        out.append({"Εικόνα": sprite(BY_NAME[b], small=True), "Pokémon": label(b),
+                    "Σκορ": float(ml.to_score(final)),
+                    "Μαζί σε ομάδες %": usage.teammate_pct(a, b) * 100 if real is not None else None,
+                    "Lift (πραγμ.)": 2 ** real if real is not None else None,
+                    "ML πρόβλεψη": float(ml.to_score(pr)),
+                    "Heuristic": 100 * sum(x[k] * v for k, v in SYN_WEIGHTS.items()) / sum(SYN_WEIGHTS.values()),
+                    "Γιατί": reasons(pa, profiles[b], fa, feats[b], x), "_name": b, "_final": final})
+    res = pd.DataFrame(out).sort_values("Σκορ", ascending=False).reset_index(drop=True)
+    res.index = res.index + 1
+    det = usage.detail.get(a)
+    if det:
+        top_moves = ", ".join(f"{k} {v * 100:.0f}%" for k, v in list(det["moves"].items())[:6])
+        top_items = ", ".join(f"{k} {v * 100:.0f}%" for k, v in list(det["items"].items())[:3])
+        st.caption(f"**{a}** · usage {usage.usage(a) * 100:.1f}% · κινήσεις: {top_moves} · items: {top_items}")
+    else:
+        st.caption(f"Το {a} δεν έχει αρκετά δεδομένα στο ladder — οι προτάσεις βγαίνουν μόνο από το μοντέλο ML.")
+    top_n = st.slider("Πόσους συμπαίκτες να δείξω", 5, 40, 15)
+    show = res.head(top_n).drop(columns=["_name", "_final"])
+    st.dataframe(show, width="stretch", height=min(38 + 35 * len(show), 720), column_config={
+        "Εικόνα": st.column_config.ImageColumn("", width="small"),
+        "Σκορ": st.column_config.ProgressColumn("Σκορ", min_value=0, max_value=100, format="%.0f"),
+        "Μαζί σε ομάδες %": st.column_config.NumberColumn(format="%.1f%%",
+                                                          help=f"Από τις ομάδες που έχουν {a}, πόσες έχουν και αυτό"),
+        "Lift (πραγμ.)": st.column_config.NumberColumn(format="×%.2f", help="×1 = όσο συχνά θα περίμενε κανείς τυχαία"),
+        "ML πρόβλεψη": st.column_config.NumberColumn(format="%.0f"),
+        "Heuristic": st.column_config.NumberColumn(format="%.0f"),
+        "Γιατί": st.column_config.TextColumn(width="large"),
+    })
+    st.caption("Σκορ 50 = όσο συχνά θα έμπαιναν μαζί τυχαία · >50 = ταιριάζουν · Τελικό σκορ = 70% πραγματικά "
+               "δεδομένα + 30% ML (μόνο ML όταν λείπουν δεδομένα).")
+
+    st.subheader("🧩 Φτιάξε 6άδα γύρω από το " + a)
+    k1, k2 = st.columns(2)
+    lam = k1.slider("Βάρος «viability» (πόσο δημοφιλές είναι στο ladder)", 0.0, 1.0, 0.3, 0.05)
+    pool_n = k2.slider("Υποψήφιοι από τους καλύτερους συμπαίκτες", 10, 60, 30, 5)
+    pool = [a] + res["_name"].head(pool_n).tolist()
+    pair = {}
+    feats_rows, keys = [], []
+    for x, y_ in combinations(pool, 2):
+        keys.append((x, y_))
+        feats_rows.append(ml.pair_features(profiles[x], profiles[y_], feats[x], feats[y_]))
+    P = model["model"].predict(pd.DataFrame(feats_rows)[model["columns"]]) if model else np.zeros(len(keys))
+    for (x, y_), pr in zip(keys, P):
+        real = usage.log_lift(x, y_)
+        pair[frozenset((x, y_))] = pr if real is None else 0.7 * real + 0.3 * pr
+    vmax = max((usage.usage(n) for n in pool), default=0) or 1
+    team = [a]
+    while len(team) < 6:
+        best, best_v = None, -1e9
+        for c in pool:
+            if c in team or any(BY_NAME[c]["species"] == BY_NAME[t]["species"] for t in team):
+                continue
+            if BY_NAME[c].get("form") == "mega" and any(BY_NAME[t].get("form") == "mega" for t in team):
+                continue  # one Mega per team
+            v = np.mean([pair[frozenset((c, t))] for t in team]) + lam * usage.usage(c) / vmax
+            if v > best_v:
+                best, best_v = c, v
+        if best is None:
+            break
+        team.append(best)
+    st.markdown("<div class='pk-row' style='justify-content:flex-start'>" +
+                "".join(box_html(BY_NAME[n], cur=(n == a)) for n in team) + "</div>", unsafe_allow_html=True)
+    st.caption("Άπληστος αλγόριθμος: σε κάθε βήμα μπαίνει το Pokémon με το καλύτερο μέσο σκορ με όσα έχουν "
+               "ήδη μπει (+ viability). Ένα Mega ανά ομάδα, όχι ίδιο είδος δύο φορές.")
+    if st.button("➡️ Χρήση ως ομάδα στη σελίδα 🤝 Synergy & τετράδες"):
+        st.session_state["team_names"] = team
+        st.session_state["w_team_names"] = team
+        st.success("Έτοιμο — άνοιξε τη σελίδα «🤝 Synergy & τετράδες» από το sidebar.")
+
+
 # ============================================================ page 5: methodology
 def page_method():
     st.header("ℹ️ Μεθοδολογία")
@@ -975,6 +1197,17 @@ $\Phi(a)=\Phi^+-\Phi^-$. Default: linear με $q=0$ και $p$ = τυπική α
 **Τετράδες**: όλοι οι $\binom{6}{4}=15$ συνδυασμοί αξιολογούνται με μέση/ελάχιστη συνέργεια, κάλυψη,
 συσσώρευση αδυναμιών, ακάλυπτες αδυναμίες, μέση ατομική αξία, ισορροπία φυσ./ειδ., μέση Speed.
 
+**VGC συμπαίκτες (ML)**: από τα στατιστικά του Smogon (Showdown ladder, π.χ. `gen9championsvgc2026regmb`,
+rating ≥ 1760) μετράμε πόσο συχνά δύο Pokémon είναι στην ίδια ομάδα. Στόχος του μοντέλου είναι το
+$\log_2 \text{lift} = \log_2 \frac{c_{AB} + m}{E_{AB} + m}$, όπου $c_{AB}$ οι κοινές ομάδες,
+$E_{AB} = N\,p_A\,p_B$ οι αναμενόμενες αν ήταν ανεξάρτητα και $m$ μικρό pseudo-count (smoothing).
+Χαρακτηριστικά ζεύγους: αμυντική/επιθετική κάλυψη, ρόλοι, κοινοί τύποι, setter + abuser καιρού/terrain
+(από abilities **και** κινήσεις, π.χ. Drizzle + Electro Shot), Trick Room + αργό, Tailwind, Follow Me,
+Fake Out, Earthquake + ανοσία Ground, Intimidate, Speed, BST, τύποι. Μοντέλα: Gradient Boosting
+(scikit-learn ή XGBoost), Random Forest, Ridge. Αξιολόγηση με 5-fold cross-validation (R², Spearman, MAE,
+top-10% recall) και permutation importance. Τελικό σκορ = 0.7·πραγματικό + 0.3·ML (μόνο ML αν λείπουν δεδομένα).
+Η 6άδα χτίζεται άπληστα: σε κάθε βήμα προστίθεται όποιο Pokémon έχει το μεγαλύτερο μέσο σκορ με την ομάδα.
+
 **Σημειώσεις**: Το Legends Z-A έχει real-time μάχες (ο τύπος ζημιάς είναι προσέγγιση) και δεν έχει abilities.
 Αν το PokeAPI δεν έχει ακόμα learnset για Z-A/Champions, χρησιμοποιείται του Scarlet/Violet.
 """)
@@ -983,4 +1216,4 @@ $\Phi(a)=\Phi^+-\Phi^-$. Default: linear με $q=0$ και $p$ = τυπική α
 if PAGE_KEY != "dex":
     sync_url()
 {"dex": page_pokedex, "dmg": page_damage, "rank": page_ranking,
- "syn": page_synergy, "info": page_method}[PAGE_KEY]()
+ "mate": page_mates, "syn": page_synergy, "info": page_method}[PAGE_KEY]()
