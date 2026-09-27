@@ -192,7 +192,7 @@ class LiveProvider:
             return p
         return self._cached(f"pokemon_v2/{entry['pokemon']}", build)
 
-    def pokemon_many(self, entries, workers: int = 8) -> list[dict]:
+    def pokemon_many(self, entries, workers: int = 16) -> list[dict]:
         with ThreadPoolExecutor(workers) as ex:
             return list(ex.map(self._safe_pokemon, entries))
 

@@ -345,13 +345,18 @@ def show_ranking(res: pd.DataFrame, method: str, label: str):
     score_col = "TOPSIS C*" if "TOPSIS C*" in res else "Φ (net)"
     c1, c2 = st.columns([3, 2])
     with c1:
-        st.dataframe(res.round(4), width="stretch")
+        cfg = {"Εικόνα": st.column_config.ImageColumn("", width="small")} if "Εικόνα" in res else None
+        st.dataframe(res.round(4), width="stretch", column_config=cfg, height=min(38 + 35 * len(res), 600))
     with c2:
-        st.bar_chart(res[score_col].sort_values(ascending=True), horizontal=True)
+        top = res[score_col].sort_values(ascending=False).head(30).sort_values()
+        if len(res) > 30:
+            st.caption("Top 30")
+        st.bar_chart(top, horizontal=True)
     if method == "Και τα δύο":
         rho = spearman(res["Κατάταξη TOPSIS"], res["Κατάταξη PROMETHEE"])
         st.info(f"Συσχέτιση Spearman ανάμεσα σε TOPSIS και PROMETHEE: **ρ = {rho:.3f}**")
-    st.download_button(f"⬇️ Αποτελέσματα {label} (CSV)", res.to_csv().encode("utf-8-sig"),
+    st.download_button(f"⬇️ Αποτελέσματα {label} (CSV)",
+                       res.drop(columns=["Εικόνα"], errors="ignore").to_csv().encode("utf-8-sig"),
                        file_name=f"ranking_{label}.csv", mime="text/csv")
 
 
@@ -766,14 +771,33 @@ def profiles_for(names: list, spread: str, cov: str) -> list:
     return [build_profile(p, LEVEL, spread, prov.learnset(p, GAME), mi, cov, G["has_abilities"]) for p in ps]
 
 
+@st.cache_data(show_spinner="Υπολογισμός κριτηρίων & πίνακα ζημιάς…", max_entries=20)
+def ranking_data(src: str, game: str, level: int, names: tuple, spread: str, power: int, cov: str):
+    profiles = profiles_for(list(names), spread, cov)
+    dmg = damage_matrix(profiles, power)
+    return single_criteria(profiles, dmg), dmg
+
+
 def page_ranking():
     st.header("🏆 Κατάταξη Pokémon με TOPSIS / PROMETHEE II")
-    names = synced_multiselect("Υποψήφια Pokémon (εναλλακτικές)", "rank_names", default_pick(12))
+    mode = st.radio("Υποψήφια Pokémon", ["all", "manual"], horizontal=True, key="rank_mode",
+                    format_func=lambda k: f"Όλα τα Pokémon του παιχνιδιού ({len(IN_ROSTER)})" if k == "all"
+                    else "Επιλογή με το χέρι")
+    if mode == "all":
+        f1, f2, f3 = st.columns([1, 2, 2])
+        with_megas = f1.checkbox("Με Megas", value=True, key="rank_megas", disabled=not N_MEGA)
+        types_f = f2.multiselect("Μόνο τύποι", TYPES, format_func=str.capitalize, key="rank_types",
+                                 help="Κενό = όλοι οι τύποι")
+        exclude = f3.multiselect("Εξαίρεση", IN_ROSTER, format_func=label, key="rank_excl")
+        names = [n for n in IN_ROSTER if n not in exclude and (with_megas or BY_NAME[n].get("form") != "mega")]
+        st.caption(f"**{len(names)}** Pokémon στην κατάταξη. Η πρώτη λήψη όλων από το PokeAPI παίρνει "
+                   "1–2 λεπτά· μετά μένουν αποθηκευμένα.")
+    else:
+        names = synced_multiselect("Επιλογή Pokémon", "rank_names", default_pick(12))
+        types_f = []
     if len(names) < 3:
-        st.info("Διάλεξε τουλάχιστον 3 Pokémon.")
+        st.info("Χρειάζονται τουλάχιστον 3 Pokémon.")
         return
-    if len(names) > 60:
-        st.warning("Πολλά Pokémon → η πρώτη λήψη από το PokeAPI θα αργήσει (μετά μένουν στην cache).")
     c1, c2, c3, c4 = st.columns(4)
     spread = c1.selectbox("Spread", list(SPREADS), format_func=lambda k: SPREADS[k])
     power = c2.number_input("Power γενικής STAB κίνησης", 40, 150, 90,
@@ -782,9 +806,15 @@ def page_ranking():
                        format_func=lambda k: "όλων των επιθετικών κινήσεων" if k == "learnset" else "μόνο STAB")
     method = c4.radio("Μέθοδος", ["TOPSIS", "PROMETHEE II", "Και τα δύο"], index=2)
 
-    profiles = profiles_for(names, spread, cov)
-    dmg = damage_matrix(profiles, power)
-    X = single_criteria(profiles, dmg)
+    X, dmg = ranking_data(SRC, GAME, LEVEL, tuple(names), spread, int(power), cov)
+    if types_f:  # type filter applied after loading (types are known only then)
+        keep = [n for n in X.index if set(get_pokemon(SRC, BY_NAME[n])["types"]) & set(types_f)]
+        X, dmg = X.loc[keep], dmg.loc[keep, keep]
+        st.caption(f"Φίλτρο τύπου: {len(keep)} Pokémon (η επιθετική/αμυντική ισχύς μετράει απέναντι σε όλα).")
+        if len(keep) < 3:
+            st.info("Λιγότερα από 3 Pokémon με αυτούς τους τύπους.")
+            return
+    names = list(X.index)
 
     st.subheader("Κριτήρια & βάρη")
     keys, w, ben, funcs = criteria_editor("crit_single", CRITERIA)
@@ -797,12 +827,20 @@ def page_ranking():
         st.dataframe(Xs.round(2), width="stretch")
         st.download_button("⬇️ Decision matrix (CSV)", Xs.to_csv().encode("utf-8-sig"), "decision_matrix.csv")
     with st.expander("Πίνακας ζημιάς: γραμμή = επιτιθέμενος, στήλη = αμυνόμενος (% HP, μέσος όρος rolls)"):
-        st.dataframe(dmg.round(1).style.background_gradient(cmap="Reds", axis=None).format("{:.1f}"),
-                     width="stretch")
+        if len(dmg) <= 40:
+            st.dataframe(dmg.round(1).style.background_gradient(cmap="Reds", axis=None).format("{:.1f}"),
+                         width="stretch")
+        else:
+            st.dataframe(dmg.round(1), width="stretch", height=420)
+        st.download_button("⬇️ Πίνακας ζημιάς (CSV)", dmg.round(2).to_csv().encode("utf-8-sig"),
+                           "damage_matrix.csv")
 
     st.subheader("Αποτελέσματα")
     res = run_mcda(Xs, w, ben, funcs, method)
-    show_ranking(res, method, "pokemon")
+    disp = res.copy()
+    disp.insert(0, "Εικόνα", [sprite(BY_NAME[n], small=True) for n in res.index])
+    disp.index = [label(n) for n in res.index]
+    show_ranking(disp, method, "pokemon")
     score = res["TOPSIS C*"] if "TOPSIS C*" in res else \
         (res["Φ (net)"] - res["Φ (net)"].min()) / max(res["Φ (net)"].max() - res["Φ (net)"].min(), 1e-9)
     st.session_state["indiv_scores"] = score.to_dict()
